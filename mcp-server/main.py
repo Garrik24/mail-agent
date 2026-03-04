@@ -3,13 +3,14 @@ MCP сервер для Mail.ru почты.
 Подключается к Claude.ai через Streamable HTTP транспорт.
 """
 
+import contextlib
 import logging
 import os
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,19 +34,23 @@ async def health(request):
     return JSONResponse({"status": "ok"})
 
 
+@contextlib.asynccontextmanager
+async def lifespan(app: Starlette):
+    async with mcp.session_manager.run():
+        yield
+
+
+# ASGI приложение (используется и при прямом запуске, и через uvicorn)
+app = Starlette(
+    routes=[
+        Route("/health", health),
+        Mount("/", app=mcp.streamable_http_app()),
+    ],
+    lifespan=lifespan,
+)
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     log.info(f"Запуск Mail MCP сервера на порту {port}")
-
-    # Получаем ASGI приложение от MCP
-    mcp_app = mcp.streamable_http_app()
-
-    # Комбинируем с health endpoint
-    app = Starlette(
-        routes=[
-            Route("/health", health),
-        ],
-    )
-    app.mount("/", mcp_app)
-
     uvicorn.run(app, host="0.0.0.0", port=port)
