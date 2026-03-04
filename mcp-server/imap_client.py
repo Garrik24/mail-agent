@@ -86,6 +86,26 @@ def get_attachments_info(msg: email.message.Message) -> list[dict]:
     return attachments
 
 
+def parse_recipients(header_value: str) -> list[dict]:
+    """Парсит заголовок с адресами (To, CC) в список {name, email}."""
+    if not header_value:
+        return []
+    decoded = decode_header_value(header_value)
+    # Разделяем по запятой, парсим каждый адрес
+    recipients = []
+    for part in decoded.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, addr = parseaddr(part)
+        if addr:
+            recipients.append({
+                "name": decode_header_value(name) or addr,
+                "email": addr,
+            })
+    return recipients
+
+
 def parse_email_message(msg: email.message.Message, uid: str = "") -> dict:
     """Парсит email.message.Message в словарь."""
     sender_name, sender_email = parseaddr(msg.get("From", ""))
@@ -96,6 +116,11 @@ def parse_email_message(msg: email.message.Message, uid: str = "") -> dict:
         "sender_name": decode_header_value(sender_name) or sender_email,
         "sender_email": sender_email,
         "to": decode_header_value(msg.get("To", "")),
+        "to_list": parse_recipients(msg.get("To", "")),
+        "cc": decode_header_value(msg.get("Cc", "")),
+        "cc_list": parse_recipients(msg.get("Cc", "")),
+        "reply_to": decode_header_value(msg.get("Reply-To", "")),
+        "reply_to_email": parseaddr(msg.get("Reply-To", ""))[1] or "",
         "date": msg.get("Date", ""),
         "flags": "",
         "body_preview": get_body(msg)[:500],
@@ -251,26 +276,123 @@ class IMAPClient:
                 log.error(f"Ошибка чтения письма {uid}: {e}")
         return emails
 
-    def send_reply(self, email_uid: str, body: str,
-                   folder: str = "INBOX") -> dict:
-        """Ответить на письмо через SMTP."""
-        # Сначала получим оригинальное письмо
+    def _find_sent_folder(self) -> str:
+        """Находит папку Отправленные по IMAP-флагу \\Sent."""
+        self._ensure_connected()
+        status, data = self.conn.list()
+        if status != "OK":
+            return ""
+        for item in data:
+            if isinstance(item, bytes):
+                decoded = item.decode("utf-8", errors="replace")
+                if "\\Sent" in decoded:
+                    # Извлекаем имя папки
+                    parts = decoded.rsplit('" "', 1)
+                    if len(parts) == 2:
+                        return parts[1].rstrip('"')
+        return ""
+
+    def _save_to_sent(self, msg: MIMEMultipart):
+        """Сохраняет отправленное письмо в папку Отправленные."""
+        try:
+            sent_folder = self._find_sent_folder()
+            if not sent_folder:
+                log.warning("Папка Отправленные не найдена")
+                return
+            self._ensure_connected()
+            self.conn.append(
+                f'"{sent_folder}"',
+                "\\Seen",
+                None,
+                msg.as_bytes(),
+            )
+            log.info(f"Копия сохранена в {sent_folder}")
+        except Exception as e:
+            log.error(f"Не удалось сохранить в Отправленные: {e}")
+
+    def get_reply_info(self, email_uid: str,
+                       folder: str = "INBOX") -> dict:
+        """Получить информацию о получателях для ответа на письмо.
+        Возвращает to, cc, reply_to — кому пойдёт ответ."""
         original = self.get_email_body(email_uid, folder)
         if "error" in original:
             return original
 
-        to_email = original["sender_email"]
+        # Кому ответить (Reply-To приоритетнее From)
+        reply_to = original.get("reply_to_email", "") or original["sender_email"]
+        reply_to_name = original.get("reply_to", "") or original["sender_name"]
+
+        # CC получатели (исключая нас самих)
+        cc_list = [
+            r for r in original.get("cc_list", [])
+            if r["email"].lower() != MAIL_USER.lower()
+        ]
+
+        # To получатели из оригинала (кроме нас — это другие люди в To)
+        other_to = [
+            r for r in original.get("to_list", [])
+            if r["email"].lower() != MAIL_USER.lower()
+        ]
+
+        return {
+            "original_subject": original["subject"],
+            "reply_to": {"name": reply_to_name, "email": reply_to},
+            "cc_recipients": cc_list,
+            "other_to_recipients": other_to,
+            "total_recipients_if_reply_all": 1 + len(cc_list) + len(other_to),
+            "hint": (
+                "Используй send_reply с reply_all=true чтобы ответить всем, "
+                "или reply_all=false чтобы ответить только отправителю. "
+                "Можно передать cc_override чтобы изменить список CC."
+            ),
+        }
+
+    def send_reply(self, email_uid: str, body: str,
+                   folder: str = "INBOX",
+                   reply_all: bool = False,
+                   cc_override: list[str] | None = None) -> dict:
+        """Ответить на письмо через SMTP.
+
+        reply_all: если True — отвечает всем (To + CC оригинала)
+        cc_override: если указан — используется вместо оригинальных CC
+        """
+        original = self.get_email_body(email_uid, folder)
+        if "error" in original:
+            return original
+
+        # Кому отвечаем
+        reply_to = original.get("reply_to_email", "") or original["sender_email"]
+
         subject = original["subject"]
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
         msg = MIMEMultipart()
         msg["From"] = formataddr((MAIL_USER.split("@")[0], MAIL_USER))
-        msg["To"] = to_email
+        msg["To"] = reply_to
         msg["Subject"] = subject
         msg["Date"] = formatdate(localtime=True)
         msg["In-Reply-To"] = original.get("message_id", "")
         msg["References"] = original.get("message_id", "")
+
+        # CC получатели
+        cc_emails = []
+        if cc_override is not None:
+            cc_emails = cc_override
+        elif reply_all:
+            # Собираем всех из CC + To (кроме нас и кроме reply_to)
+            seen = {MAIL_USER.lower(), reply_to.lower()}
+            for r in original.get("cc_list", []):
+                if r["email"].lower() not in seen:
+                    cc_emails.append(r["email"])
+                    seen.add(r["email"].lower())
+            for r in original.get("to_list", []):
+                if r["email"].lower() not in seen:
+                    cc_emails.append(r["email"])
+                    seen.add(r["email"].lower())
+
+        if cc_emails:
+            msg["Cc"] = ", ".join(cc_emails)
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
@@ -278,12 +400,20 @@ class IMAPClient:
             with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as smtp:
                 smtp.login(MAIL_USER, MAIL_PASS)
                 smtp.send_message(msg)
-            log.info(f"Ответ отправлен: {to_email}, тема: {subject}")
-            return {
+
+            # Сохраняем в Отправленные
+            self._save_to_sent(msg)
+
+            result = {
                 "status": "sent",
-                "to": to_email,
+                "to": reply_to,
                 "subject": subject,
             }
+            if cc_emails:
+                result["cc"] = cc_emails
+            log.info(f"Ответ отправлен: to={reply_to}, cc={cc_emails}, тема: {subject}")
+            return result
+
         except Exception as e:
             log.error(f"Ошибка отправки: {e}")
             return {"error": str(e)}

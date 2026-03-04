@@ -152,19 +152,50 @@ def register_tools(mcp):
         return _run()
 
     @mcp.tool()
+    def prepare_reply(email_uid: str, folder: str = "INBOX") -> str:
+        """Подготовить ответ: показать всех получателей ПЕРЕД отправкой.
+        ОБЯЗАТЕЛЬНО вызови перед send_reply, чтобы показать пользователю
+        кому пойдёт письмо (To, CC) и дать возможность изменить список.
+
+        Args:
+            email_uid: UID письма, на которое хотим ответить
+            folder: Папка, где находится оригинальное письмо
+        """
+        @_with_imap
+        def _run(client: IMAPClient):
+            result = client.get_reply_info(
+                email_uid=email_uid, folder=folder,
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return _run()
+
+    @mcp.tool()
     def send_reply(email_uid: str, body: str,
-                   folder: str = "INBOX") -> str:
-        """Ответить на письмо. Отправляет ответ через SMTP.
+                   folder: str = "INBOX",
+                   reply_all: bool = False,
+                   cc_override: str = "") -> str:
+        """Ответить на письмо. СНАЧАЛА вызови prepare_reply чтобы показать
+        пользователю получателей и получить подтверждение.
+
+        Письмо сохраняется в папку Отправленные автоматически.
 
         Args:
             email_uid: UID письма, на которое отвечаем
             body: Текст ответа
             folder: Папка, где находится оригинальное письмо
+            reply_all: True = ответить всем (отправитель + CC + другие To).
+                       False = ответить только отправителю.
+            cc_override: Если нужно изменить CC вручную — список email через запятую.
+                         Пример: "a@mail.ru, b@mail.ru". Пустая строка = авто.
         """
         @_with_imap
         def _run(client: IMAPClient):
+            cc_list = None
+            if cc_override.strip():
+                cc_list = [e.strip() for e in cc_override.split(",") if e.strip()]
             result = client.send_reply(
                 email_uid=email_uid, body=body, folder=folder,
+                reply_all=reply_all, cc_override=cc_list,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
