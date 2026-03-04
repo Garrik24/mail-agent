@@ -5,6 +5,7 @@ IMAP клиент для Mail.ru с поддержкой reconnect и русск
 import imaplib
 import email
 import email.header
+import email.message
 import smtplib
 import logging
 import os

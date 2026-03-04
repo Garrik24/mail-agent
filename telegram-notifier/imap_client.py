@@ -6,6 +6,7 @@ IMAP клиент для Telegram нотификатора.
 import imaplib
 import email
 import email.header
+import email.message
 import logging
 import os
 from email.utils import parseaddr
