@@ -5,7 +5,11 @@ MCP сервер для Mail.ru почты.
 
 import logging
 import os
+import uvicorn
 from mcp.server.fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,7 +28,24 @@ mcp = FastMCP(
 from tools import register_tools
 register_tools(mcp)
 
+
+async def health(request):
+    return JSONResponse({"status": "ok"})
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     log.info(f"Запуск Mail MCP сервера на порту {port}")
-    mcp.run(transport="streamable-http", host="0.0.0.0", port=port)
+
+    # Получаем ASGI приложение от MCP
+    mcp_app = mcp.streamable_http_app()
+
+    # Комбинируем с health endpoint
+    app = Starlette(
+        routes=[
+            Route("/health", health),
+        ],
+    )
+    app.mount("/", mcp_app)
+
+    uvicorn.run(app, host="0.0.0.0", port=port)
