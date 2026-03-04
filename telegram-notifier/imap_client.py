@@ -18,9 +18,11 @@ IMAP_PORT = int(os.environ.get("MAIL_IMAP_PORT", "993"))
 MAIL_USER = os.environ.get("MAIL_USERNAME", "")
 MAIL_PASS = os.environ.get("MAIL_PASSWORD", "")
 
-# Папки, которые игнорируем
-IGNORED_FOLDERS = {"Spam", "Рассылки", "Subscriptions", "Trash", "Drafts",
-                   "Sent", "Отправленные", "Корзина", "Спам", "Черновики"}
+# IMAP-флаги папок, которые игнорируем
+IGNORED_FLAGS = {"\\Sent", "\\Drafts", "\\Trash", "\\Spam", "\\Junk"}
+
+# Имена папок, которые игнорируем (fallback если флагов нет)
+IGNORED_FOLDERS = {"Spam", "Junk", "Trash", "Drafts", "Sent"}
 
 # Отправители, которых игнорируем
 IGNORED_SENDERS = {"noreply@", "newsletter@", "no-reply@", "info-noreply@",
@@ -80,7 +82,7 @@ def is_ignored_sender(sender_email: str) -> bool:
 
 
 def get_checkable_folders(conn: imaplib.IMAP4_SSL) -> list[str]:
-    """Получить список папок для проверки (исключая игнорируемые)."""
+    """Получить список папок для проверки (исключая Sent/Trash/Drafts/Spam)."""
     status, data = conn.list()
     if status != "OK":
         return ["INBOX"]
@@ -88,6 +90,23 @@ def get_checkable_folders(conn: imaplib.IMAP4_SSL) -> list[str]:
     for item in data:
         if isinstance(item, bytes):
             decoded = item.decode("utf-8", errors="replace")
+
+            # Извлекаем флаги из скобок: (\Sent) "/" "name"
+            flags_part = ""
+            if decoded.startswith("("):
+                end = decoded.index(")")
+                flags_part = decoded[1:end]
+
+            # Пропускаем по IMAP-флагам
+            skip = False
+            for flag in IGNORED_FLAGS:
+                if flag in flags_part:
+                    skip = True
+                    break
+            if skip:
+                continue
+
+            # Извлекаем имя папки
             parts = decoded.rsplit('" "', 1)
             if len(parts) == 2:
                 name = parts[1].rstrip('"')
@@ -95,10 +114,11 @@ def get_checkable_folders(conn: imaplib.IMAP4_SSL) -> list[str]:
                 parts2 = decoded.rsplit(" ", 1)
                 name = parts2[-1].strip('"')
 
-            # Проверяем, не в списке игнорируемых
-            folder_base = name.rsplit("/", 1)[-1] if "/" in name else name
-            if folder_base not in IGNORED_FOLDERS:
-                folders.append(name)
+            # Fallback: проверяем имя (для папок без флагов)
+            if name in IGNORED_FOLDERS:
+                continue
+
+            folders.append(name)
     return folders if folders else ["INBOX"]
 
 
@@ -146,6 +166,9 @@ def fetch_recent_emails(since_date_str: str,
                             continue
 
                         _, sender_email = parseaddr(msg.get("From", ""))
+                        # Пропускаем свои исходящие
+                        if sender_email.lower() == MAIL_USER.lower():
+                            continue
                         # Пропускаем игнорируемых отправителей
                         if is_ignored_sender(sender_email):
                             continue
