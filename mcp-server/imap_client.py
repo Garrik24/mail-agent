@@ -410,7 +410,8 @@ class IMAPClient:
             try:
                 smtp.login(MAIL_USER, MAIL_PASS)
                 log.info("SMTP авторизация успешна, отправка...")
-                smtp.send_message(msg)
+                all_recipients = [reply_to] + cc_emails
+                smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
             finally:
                 smtp.quit()
 
