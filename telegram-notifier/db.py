@@ -8,7 +8,9 @@ import os
 
 log = logging.getLogger(__name__)
 
-DB_PATH = os.environ.get("DB_PATH", "processed_emails.db")
+# Используем /data (Railway Volume) если доступен, иначе локальный файл
+_default_db = "/data/processed_emails.db" if os.path.isdir("/data") else "processed_emails.db"
+DB_PATH = os.environ.get("DB_PATH", _default_db)
 
 
 def init_db():

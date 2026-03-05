@@ -3,6 +3,7 @@ IMAP клиент для Telegram нотификатора.
 Упрощённая версия: только получение новых писем.
 """
 
+import hashlib
 import imaplib
 import email
 import email.header
@@ -160,12 +161,16 @@ def fetch_recent_emails(since_date_str: str,
                         raw = msg_data[0][1]
                         msg = email.message_from_bytes(raw)
 
+                        _, sender_email = parseaddr(msg.get("From", ""))
+
                         message_id = msg.get("Message-ID", "").strip()
+                        # Fallback ID если Message-ID пустой
+                        if not message_id:
+                            raw_key = f"{sender_email}|{msg.get('Subject', '')}|{msg.get('Date', '')}"
+                            message_id = f"fallback-{hashlib.md5(raw_key.encode()).hexdigest()}"
                         # Пропускаем уже обработанные
                         if message_id in processed_ids:
                             continue
-
-                        _, sender_email = parseaddr(msg.get("From", ""))
                         # Пропускаем свои исходящие
                         if sender_email.lower() == MAIL_USER.lower():
                             continue
