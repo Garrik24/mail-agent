@@ -397,9 +397,18 @@ class IMAPClient:
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
         try:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as smtp:
+            if SMTP_PORT == 465:
+                smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+            else:
+                smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            try:
                 smtp.login(MAIL_USER, MAIL_PASS)
                 smtp.send_message(msg)
+            finally:
+                smtp.quit()
 
             # Сохраняем в Отправленные
             self._save_to_sent(msg)
