@@ -4,6 +4,8 @@ MCP инструменты для работы с почтой Mail.ru.
 
 import json
 import logging
+import smtplib
+import os
 from imap_client import IMAPClient
 
 log = logging.getLogger(__name__)
@@ -211,3 +213,80 @@ def register_tools(mcp):
                 ensure_ascii=False, indent=2,
             )
         return _run()
+
+    @mcp.tool()
+    def test_smtp() -> str:
+        """Диагностика SMTP подключения к Mail.ru.
+        Проверяет соединение, SSL, EHLO, авторизацию.
+        Не отправляет писем — только тестирует подключение.
+        """
+        smtp_host = os.environ.get("MAIL_SMTP_HOST", "smtp.mail.ru")
+        smtp_port = int(os.environ.get("MAIL_SMTP_PORT", "465"))
+        mail_user = os.environ.get("MAIL_USERNAME", "")
+        mail_pass = os.environ.get("MAIL_PASSWORD", "")
+
+        steps = []
+        try:
+            # Шаг 1: подключение
+            steps.append(f"1. Подключение к {smtp_host}:{smtp_port}...")
+            if smtp_port == 465:
+                smtp = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=15)
+            else:
+                smtp = smtplib.SMTP(smtp_host, smtp_port, timeout=15)
+            steps.append("   OK: TCP+SSL соединение установлено")
+
+            # Шаг 2: EHLO
+            steps.append("2. Отправка EHLO...")
+            code, ehlo_msg = smtp.ehlo()
+            ehlo_str = ehlo_msg.decode("utf-8", errors="replace")
+            steps.append(f"   OK: код {code}")
+            # Извлекаем поддерживаемые методы AUTH
+            auth_line = ""
+            for line in ehlo_str.split("\n"):
+                if "AUTH" in line.upper():
+                    auth_line = line.strip()
+                    break
+            steps.append(f"   Методы авторизации: {auth_line}")
+
+            # Шаг 3: STARTTLS (только для порта 587)
+            if smtp_port != 465:
+                steps.append("3. STARTTLS...")
+                smtp.starttls()
+                smtp.ehlo()
+                steps.append("   OK: TLS установлен")
+
+            # Шаг 4: авторизация
+            steps.append(f"4. Авторизация как {mail_user}...")
+            smtp.login(mail_user, mail_pass)
+            steps.append("   OK: Авторизация успешна!")
+
+            smtp.quit()
+            steps.append("5. SMTP готов к отправке!")
+            return json.dumps(
+                {"status": "ok", "steps": steps},
+                ensure_ascii=False, indent=2,
+            )
+        except smtplib.SMTPAuthenticationError as e:
+            steps.append(f"   ОШИБКА АВТОРИЗАЦИИ: {e.smtp_code} {e.smtp_error}")
+            error_msg = e.smtp_error.decode("utf-8", errors="replace") if isinstance(e.smtp_error, bytes) else str(e.smtp_error)
+            return json.dumps(
+                {
+                    "status": "auth_error",
+                    "error": error_msg,
+                    "steps": steps,
+                    "fix": (
+                        "Ошибка авторизации SMTP. Нужен пароль для внешнего приложения Mail.ru. "
+                        "Зайдите в mail.ru → Настройки → Безопасность → "
+                        "Пароли для внешних приложений → Создать → "
+                        "Тип: 'Полный доступ к Почте'. "
+                        "Затем обновите MAIL_PASSWORD в Railway."
+                    ),
+                },
+                ensure_ascii=False, indent=2,
+            )
+        except Exception as e:
+            steps.append(f"   ОШИБКА: {type(e).__name__}: {e}")
+            return json.dumps(
+                {"status": "error", "error": str(e), "steps": steps},
+                ensure_ascii=False, indent=2,
+            )

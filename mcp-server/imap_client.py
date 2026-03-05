@@ -397,6 +397,7 @@ class IMAPClient:
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
         try:
+            log.info(f"SMTP подключение: {SMTP_HOST}:{SMTP_PORT}")
             if SMTP_PORT == 465:
                 smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
             else:
@@ -404,8 +405,10 @@ class IMAPClient:
                 smtp.ehlo()
                 smtp.starttls()
                 smtp.ehlo()
+            log.info("SMTP подключён, авторизация...")
             try:
                 smtp.login(MAIL_USER, MAIL_PASS)
+                log.info("SMTP авторизация успешна, отправка...")
                 smtp.send_message(msg)
             finally:
                 smtp.quit()
