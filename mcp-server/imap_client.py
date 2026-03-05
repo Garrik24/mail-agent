@@ -400,6 +400,7 @@ class IMAPClient:
             log.info(f"SMTP подключение: {SMTP_HOST}:{SMTP_PORT}")
             if SMTP_PORT == 465:
                 smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+                smtp.ehlo()
             else:
                 smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
                 smtp.ehlo()
