@@ -203,6 +203,28 @@ def register_tools(mcp):
         return _run()
 
     @mcp.tool()
+    def forward_email(email_uid: str, to: str,
+                      comment: str = "",
+                      folder: str = "INBOX") -> str:
+        """Переслать письмо (с вложениями) на указанный email-адрес.
+        Пересылает полное письмо: тело + все вложения (PDF, DOC и т.д.).
+
+        Args:
+            email_uid: UID оригинального письма
+            to: Email получателя (например, ashirovna2012@gmail.com)
+            comment: Комментарий перед пересланным письмом (необязательно)
+            folder: Папка с оригиналом (по умолчанию INBOX)
+        """
+        @_with_imap
+        def _run(client: IMAPClient):
+            result = client.forward_email(
+                email_uid=email_uid, to=to,
+                comment=comment, folder=folder,
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return _run()
+
+    @mcp.tool()
     def get_folders() -> str:
         """Получить список всех папок почтового ящика."""
         @_with_imap

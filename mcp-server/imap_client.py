@@ -347,6 +347,139 @@ class IMAPClient:
             ),
         }
 
+    def _extract_attachments_data(self, msg: email.message.Message) -> list[dict]:
+        """Извлекает вложения с содержимым (для пересылки)."""
+        attachments = []
+        if not msg.is_multipart():
+            return attachments
+        for part in msg.walk():
+            cd = str(part.get("Content-Disposition", ""))
+            if "attachment" in cd or "inline" in cd:
+                filename = part.get_filename()
+                if filename:
+                    filename = decode_header_value(filename)
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        attachments.append({
+                            "filename": filename,
+                            "content_type": part.get_content_type(),
+                            "data": payload,
+                        })
+        return attachments
+
+    def forward_email(self, email_uid: str, to: str,
+                      comment: str = "",
+                      folder: str = "INBOX") -> dict:
+        """Переслать письмо (с вложениями) на указанный email.
+
+        Args:
+            email_uid: UID оригинального письма
+            to: Email получателя
+            comment: Комментарий перед пересланным телом (необязательно)
+            folder: Папка с оригиналом
+        """
+        # 1. Забираем полное оригинальное письмо (RFC822)
+        self._select_folder(folder)
+        status, data = self.conn.fetch(email_uid.encode(), "(RFC822)")
+        if status != "OK" or not data or not data[0]:
+            return {"error": f"Письмо {email_uid} не найдено в папке {folder}"}
+
+        raw = data[0][1]
+        original = email.message_from_bytes(raw)
+
+        # 2. Парсим заголовки
+        orig_subject = decode_header_value(original.get("Subject", "(без темы)"))
+        orig_from = decode_header_value(original.get("From", ""))
+        orig_date = original.get("Date", "")
+        orig_to = decode_header_value(original.get("To", ""))
+
+        # 3. Извлекаем вложения с данными
+        attachments = self._extract_attachments_data(original)
+
+        # 4. Извлекаем тело
+        original_body = get_body(original)
+
+        # 5. Собираем новое MIME-сообщение
+        fwd_subject = f"Fwd: {orig_subject}"
+
+        fwd_header = (
+            "---------- Пересланное сообщение ----------\n"
+            f"От: {orig_from}\n"
+            f"Дата: {orig_date}\n"
+            f"Тема: {orig_subject}\n"
+            f"Кому: {orig_to}\n"
+            "--------------------------------------------\n\n"
+        )
+
+        body_parts = []
+        if comment.strip():
+            body_parts.append(comment.strip())
+            body_parts.append("\n\n")
+        body_parts.append(fwd_header)
+        body_parts.append(original_body)
+
+        signature = (
+            "\n\n--\n"
+            "С уважением,\n"
+            "Коровко Игорь Александрович\n"
+            "Генеральный директор\n"
+            'ООО "Ставропольгеодезия"\n'
+            "тел. +7 938 346 777 1\n"
+            "г.Ставрополь, ул.Тельмана 41, офис 38\n"
+            "Ставропольгеодезия.рф"
+        )
+        body_parts.append(signature)
+        full_body = "".join(body_parts)
+
+        msg = MIMEMultipart("mixed")
+        msg["From"] = formataddr((MAIL_USER.split("@")[0], MAIL_USER))
+        msg["To"] = to
+        msg["Subject"] = fwd_subject
+        msg["Date"] = formatdate(localtime=True)
+
+        # Текстовая часть
+        msg.attach(MIMEText(full_body, "plain", "utf-8"))
+
+        # Вложения
+        from email.mime.application import MIMEApplication
+        for att in attachments:
+            part = MIMEApplication(att["data"], Name=att["filename"])
+            part["Content-Disposition"] = f'attachment; filename="{att["filename"]}"'
+            msg.attach(part)
+
+        # 6. Отправляем
+        try:
+            log.info(f"SMTP: пересылка {fwd_subject} -> {to} ({len(attachments)} вложений)")
+            if SMTP_PORT == 465:
+                smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+                smtp.ehlo()
+            else:
+                smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            try:
+                smtp.login(MAIL_USER, MAIL_PASS)
+                smtp.sendmail(MAIL_USER, [to], msg.as_string())
+            finally:
+                smtp.quit()
+
+            # Сохраняем в Отправленные
+            self._save_to_sent(msg)
+
+            log.info(f"Письмо переслано: to={to}, тема: {fwd_subject}")
+            return {
+                "status": "forwarded",
+                "to": to,
+                "subject": fwd_subject,
+                "attachments_count": len(attachments),
+                "attachments": [a["filename"] for a in attachments],
+            }
+
+        except Exception as e:
+            log.error(f"Ошибка пересылки: {e}")
+            return {"error": str(e)}
+
     def send_reply(self, email_uid: str, body: str,
                    folder: str = "INBOX",
                    reply_all: bool = False,
