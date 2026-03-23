@@ -78,22 +78,26 @@ def register_tools(mcp):
 
     @mcp.tool()
     def search_emails(query: str = "", sender: str = "",
-                      date_from: str = "", folder: str = "INBOX",
-                      limit: int = 50) -> str:
+                      date_from: str = "", date_to: str = "",
+                      folder: str = "INBOX", limit: int = 50) -> str:
         """Поиск писем по ключевым словам, отправителю или дате.
 
         Args:
             query: Текст для поиска в теме и теле письма
             sender: Email или имя отправителя
             date_from: Дата начала поиска в формате YYYY-MM-DD
+            date_to: Дата конца поиска в формате YYYY-MM-DD (включительно)
             folder: Папка почты (по умолчанию INBOX)
             limit: Максимум писем (по умолчанию 50)
         """
         @_with_imap
         def _run(client: IMAPClient):
+            # Если задан диапазон дат — старые первыми (хронологически)
+            sort_order = "asc" if date_to else "desc"
             emails = client.search_emails(
                 query=query, sender=sender, date_from=date_from,
-                folder=folder, limit=limit,
+                date_to=date_to, folder=folder, limit=limit,
+                sort_order=sort_order,
             )
             if not emails:
                 return json.dumps(

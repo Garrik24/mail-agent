@@ -212,9 +212,13 @@ class IMAPClient:
         return self._fetch_emails(uids)
 
     def search_emails(self, query: str = "", sender: str = "",
-                      date_from: str = "", folder: str = "INBOX",
-                      limit: int = 50) -> list[dict]:
-        """Поиск писем по тексту, отправителю, дате."""
+                      date_from: str = "", date_to: str = "",
+                      folder: str = "INBOX", limit: int = 50,
+                      sort_order: str = "desc") -> list[dict]:
+        """Поиск писем по тексту, отправителю, дате.
+
+        sort_order: "asc" = старые первыми, "desc" = новые первыми (по умолчанию).
+        """
         self._select_folder(folder)
         criteria = []
         if query:
@@ -222,10 +226,16 @@ class IMAPClient:
         if sender:
             criteria.append(f'(FROM "{sender}")')
         if date_from:
-            # date_from в формате YYYY-MM-DD
             try:
                 dt = datetime.strptime(date_from, "%Y-%m-%d")
                 criteria.append(f'(SINCE "{dt.strftime("%d-%b-%Y")}")')
+            except ValueError:
+                pass
+        if date_to:
+            try:
+                # IMAP BEFORE — строго раньше даты, +1 день для включения самой даты
+                dt = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
+                criteria.append(f'(BEFORE "{dt.strftime("%d-%b-%Y")}")')
             except ValueError:
                 pass
         if not criteria:
@@ -235,8 +245,12 @@ class IMAPClient:
         status, data = self.conn.search(None, search_str)
         if status != "OK" or not data[0]:
             return []
-        uids = data[0].split()[-limit:]
-        return self._fetch_emails(uids)
+        uids = data[0].split()
+        if sort_order == "asc":
+            selected_uids = uids[:limit]
+        else:
+            selected_uids = uids[-limit:]
+        return self._fetch_emails(selected_uids)
 
     def get_email_body(self, email_uid: str,
                        folder: str = "INBOX") -> dict:
