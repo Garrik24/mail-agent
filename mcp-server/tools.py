@@ -229,6 +229,35 @@ def register_tools(mcp):
         return _run()
 
     @mcp.tool()
+    def send_new_email(to: str, subject: str, body: str,
+                       cc: str = "",
+                       attachment_urls: str = "") -> str:
+        """Отправить новое письмо (не ответ, а самостоятельное).
+        Подпись добавляется автоматически. Тело поддерживает HTML.
+
+        Args:
+            to: Email получателя (например, client@example.com)
+            subject: Тема письма
+            body: Текст письма (HTML разметка поддерживается)
+            cc: Копия — email через запятую (необязательно)
+            attachment_urls: URL файлов для вложения через запятую (прямые ссылки или Яндекс.Диск). Необязательно.
+        """
+        @_with_imap
+        def _run(client: IMAPClient):
+            cc_list = None
+            if cc.strip():
+                cc_list = [e.strip() for e in cc.split(",") if e.strip()]
+            urls_list = None
+            if attachment_urls.strip():
+                urls_list = [u.strip() for u in attachment_urls.split(",") if u.strip()]
+            result = client.send_email(
+                to=to, subject=subject, body=body,
+                cc=cc_list, attachment_urls=urls_list,
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return _run()
+
+    @mcp.tool()
     def get_folders() -> str:
         """Получить список всех папок почтового ящика."""
         @_with_imap

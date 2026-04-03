@@ -9,9 +9,12 @@ import email.message
 import smtplib
 import logging
 import os
+import urllib.request
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from email.utils import parseaddr, formataddr, formatdate
 
 log = logging.getLogger(__name__)
@@ -573,6 +576,132 @@ class IMAPClient:
             if cc_emails:
                 result["cc"] = cc_emails
             log.info(f"Ответ отправлен: to={reply_to}, cc={cc_emails}, тема: {subject}")
+            return result
+
+        except Exception as e:
+            log.error(f"Ошибка отправки: {e}")
+            return {"error": str(e)}
+
+    def _download_attachment(self, url: str) -> dict | None:
+        """Скачивает файл по URL и возвращает {filename, data, content_type}."""
+        try:
+            log.info(f"Скачивание вложения: {url}")
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+                content_type = resp.headers.get("Content-Type", "application/octet-stream")
+
+                # Имя файла из Content-Disposition или из URL
+                cd = resp.headers.get("Content-Disposition", "")
+                filename = ""
+                if "filename=" in cd:
+                    # Парсим filename из Content-Disposition
+                    for part in cd.split(";"):
+                        part = part.strip()
+                        if part.startswith("filename="):
+                            filename = part.split("=", 1)[1].strip('" ')
+                        elif part.startswith("filename*="):
+                            # RFC 5987: filename*=UTF-8''encoded_name
+                            raw = part.split("'", 2)[-1] if "'" in part else part.split("=", 1)[1]
+                            filename = urllib.parse.unquote(raw.strip('" '))
+
+                if not filename:
+                    # Извлекаем из пути URL
+                    parsed = urllib.parse.urlparse(url)
+                    filename = os.path.basename(parsed.path) or "attachment"
+                    filename = urllib.parse.unquote(filename)
+
+                log.info(f"Вложение скачано: {filename} ({len(data)} байт)")
+                return {
+                    "filename": filename,
+                    "data": data,
+                    "content_type": content_type,
+                }
+        except Exception as e:
+            log.error(f"Не удалось скачать {url}: {e}")
+            return None
+
+    def send_email(self, to: str, subject: str, body: str,
+                   cc: list[str] | None = None,
+                   attachment_urls: list[str] | None = None) -> dict:
+        """Отправить новое письмо.
+
+        Args:
+            to: Email получателя
+            subject: Тема письма
+            body: Текст письма (HTML)
+            cc: Список CC получателей
+            attachment_urls: Список URL файлов для вложения
+        """
+        signature = (
+            "<br><br>--<br>"
+            "С уважением,<br>"
+            "Коровко Игорь Александрович<br>"
+            "Генеральный директор<br>"
+            'ООО "Ставропольгеодезия"<br>'
+            "тел. +7 938 346 777 1<br>"
+            "г.Ставрополь, ул.Тельмана 41, офис 38<br>"
+            "Ставропольгеодезия.рф"
+        )
+
+        msg = MIMEMultipart("mixed")
+        msg["From"] = formataddr(("Коровко Игорь", MAIL_USER))
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg["Date"] = formatdate(localtime=True)
+
+        if cc:
+            msg["Cc"] = ", ".join(cc)
+
+        # HTML тело + подпись
+        html_body = body + signature
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+        # Вложения по URL
+        downloaded_files = []
+        if attachment_urls:
+            for url in attachment_urls:
+                att = self._download_attachment(url.strip())
+                if att:
+                    part = MIMEApplication(att["data"], Name=att["filename"])
+                    part["Content-Disposition"] = f'attachment; filename="{att["filename"]}"'
+                    msg.attach(part)
+                    downloaded_files.append(att["filename"])
+
+        # Отправка через SMTP
+        try:
+            all_recipients = [to]
+            if cc:
+                all_recipients.extend(cc)
+
+            log.info(f"SMTP: отправка нового письма -> {to}, тема: {subject}")
+            if SMTP_PORT == 465:
+                smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
+                smtp.ehlo()
+            else:
+                smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            try:
+                smtp.login(MAIL_USER, MAIL_PASS)
+                smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
+            finally:
+                smtp.quit()
+
+            # Сохраняем в Отправленные
+            self._save_to_sent(msg)
+
+            result = {
+                "status": "sent",
+                "to": to,
+                "subject": subject,
+            }
+            if cc:
+                result["cc"] = cc
+            if downloaded_files:
+                result["attachments"] = downloaded_files
+            log.info(f"Письмо отправлено: to={to}, тема: {subject}")
             return result
 
         except Exception as e:
