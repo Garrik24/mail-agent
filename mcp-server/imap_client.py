@@ -634,26 +634,33 @@ class IMAPClient:
             attachment_urls: Список URL файлов для вложения
         """
         signature = (
-            "<br><br>--<br>"
-            "С уважением,<br>"
-            "Виктория,<br>"
+            '<br><br><div style="border-top:1px solid #ccc;padding-top:10px;margin-top:10px;">'
+            '<i style="font-family:Arial,sans-serif;">'
+            "<b>С уважением,</b><br>"
+            "<b>Виктория,</b><br>"
             'помощник руководителя ООО "Ставропольгеодезия"<br>'
             "тел: +7 (938) 350-74-00<br>"
             "WhatsApp<br>"
             "г. Ставрополь, ул. Тельмана, 41, оф. 37<br>"
-            "Ставропольгеодезия.рф<br><br>"
-            '<span style="font-size:10px;color:#888;">'
+            '<a href="http://ставропольгеодезия.рф">Ставропольгеодезия.рф</a>'
+            "</i></div>"
+            '<br><div style="font-size:11px;color:#888;font-style:italic;">'
             "УВЕДОМЛЕНИЕ О КОНФИДЕНЦИАЛЬНОСТИ: Это электронное сообщение и любые документы, "
             "приложенные к нему, содержат конфиденциальную информацию. Настоящим уведомляем Вас "
             "о том, что если это сообщение не предназначено Вам, использование, копирование, "
             "распространение информации, содержащейся в настоящем сообщении, а также осуществление "
             "любых действий на основе этой информации, строго запрещено. Если Вы получили это "
             "сообщение по ошибке, пожалуйста, сообщите об этом отправителю по электронной почте "
-            "и удалите это сообщение.</span>"
+            "и удалите это сообщение.<br>"
+            "CONFIDENTIALITY NOTICE: This email and any files attached to it are confidential. "
+            "If you are not the intended recipient you are notified that using, copying, distributing "
+            "or taking any action in reliance on the contents of this information is strictly prohibited. "
+            "If you have received this email in error please notify the sender and delete this email."
+            "</div>"
         )
 
         msg = MIMEMultipart("mixed")
-        msg["From"] = formataddr(("Коровко Игорь", MAIL_USER))
+        msg["From"] = formataddr(("ООО Ставропольгеодезия, Виктория", MAIL_USER))
         msg["To"] = to
         msg["Subject"] = subject
         msg["Date"] = formatdate(localtime=True)
