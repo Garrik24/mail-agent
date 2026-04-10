@@ -438,8 +438,7 @@ class IMAPClient:
         signature = (
             "\n\n--\n"
             "С уважением,\n"
-            "Виктория,\n"
-            'помощник руководителя ООО "Ставропольгеодезия"\n'
+            'ООО "Ставропольгеодезия"\n'
             "тел: +7 (938) 350-74-00\n"
             "WhatsApp\n"
             "г. Ставрополь, ул. Тельмана, 41, оф. 37\n"
@@ -637,8 +636,7 @@ class IMAPClient:
             '<br><br><div style="border-top:1px solid #ccc;padding-top:10px;margin-top:10px;">'
             '<i style="font-family:Arial,sans-serif;">'
             "<b>С уважением,</b><br>"
-            "<b>Виктория,</b><br>"
-            'помощник руководителя ООО "Ставропольгеодезия"<br>'
+            'ООО "Ставропольгеодезия"<br>'
             "тел: +7 (938) 350-74-00<br>"
             "WhatsApp<br>"
             "г. Ставрополь, ул. Тельмана, 41, оф. 37<br>"
@@ -660,7 +658,7 @@ class IMAPClient:
         )
 
         msg = MIMEMultipart("mixed")
-        msg["From"] = formataddr(("ООО Ставропольгеодезия, Виктория", MAIL_USER))
+        msg["From"] = formataddr(("ООО Ставропольгеодезия", MAIL_USER))
         msg["To"] = to
         msg["Subject"] = subject
         msg["Date"] = formatdate(localtime=True)
