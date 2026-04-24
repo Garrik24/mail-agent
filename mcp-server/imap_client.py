@@ -2,16 +2,20 @@
 IMAP клиент для Mail.ru с поддержкой reconnect и русских кодировок.
 """
 
+import base64
 import imaplib
 import email
 import email.header
 import email.message
+import json
 import smtplib
 import logging
 import os
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
@@ -107,6 +111,59 @@ def parse_recipients(header_value: str) -> list[dict]:
                 "email": addr,
             })
     return recipients
+
+
+def attach_base64_files(msg: MIMEMultipart,
+                        attachments_json: str | None) -> list[str]:
+    """Прикрепляет к msg вложения из JSON-строки с base64-содержимым.
+
+    attachments_json: JSON-строка вида
+    [{"filename": "f.pdf", "content_base64": "...", "mime_type": "application/pdf"}]
+
+    Возвращает список имён успешно добавленных файлов.
+    """
+    if not attachments_json:
+        return []
+    try:
+        items = json.loads(attachments_json)
+    except (json.JSONDecodeError, TypeError) as e:
+        log.warning(f"Не удалось распарсить attachments JSON: {e}")
+        return []
+    if not isinstance(items, list):
+        log.warning("attachments JSON должен быть списком объектов")
+        return []
+
+    added: list[str] = []
+    for att in items:
+        if not isinstance(att, dict):
+            continue
+        filename = att.get("filename", "attachment")
+        content_b64 = att.get("content_base64", "")
+        mime_type = att.get("mime_type", "application/octet-stream")
+
+        try:
+            content = base64.b64decode(content_b64)
+        except Exception as e:
+            log.warning(f"Битое вложение {filename}: {e}")
+            continue
+
+        main_type, _, sub_type = mime_type.partition("/")
+        if not main_type or not sub_type:
+            main_type, sub_type = "application", "octet-stream"
+
+        part = MIMEBase(main_type, sub_type)
+        part.set_payload(content)
+        encoders.encode_base64(part)
+        # UTF-8 filename (RFC 2231) — поддерживает кириллицу
+        part.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=("utf-8", "", filename),
+        )
+        msg.attach(part)
+        added.append(filename)
+        log.info(f"Добавлено вложение: {filename} ({len(content)} байт)")
+    return added
 
 
 def parse_email_message(msg: email.message.Message, uid: str = "") -> dict:
@@ -499,11 +556,13 @@ class IMAPClient:
     def send_reply(self, email_uid: str, body: str,
                    folder: str = "INBOX",
                    reply_all: bool = False,
-                   cc_override: list[str] | None = None) -> dict:
+                   cc_override: list[str] | None = None,
+                   attachments_json: str | None = None) -> dict:
         """Ответить на письмо через SMTP.
 
         reply_all: если True — отвечает всем (To + CC оригинала)
         cc_override: если указан — используется вместо оригинальных CC
+        attachments_json: JSON-список вложений с base64-содержимым.
         """
         original = self.get_email_body(email_uid, folder)
         if "error" in original:
@@ -516,7 +575,7 @@ class IMAPClient:
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
 
-        msg = MIMEMultipart()
+        msg = MIMEMultipart("mixed")
         msg["From"] = formataddr((MAIL_USER.split("@")[0], MAIL_USER))
         msg["To"] = reply_to
         msg["Subject"] = subject
@@ -544,6 +603,8 @@ class IMAPClient:
             msg["Cc"] = ", ".join(cc_emails)
 
         msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        attached_files = attach_base64_files(msg, attachments_json)
 
         try:
             log.info(f"SMTP подключение: {SMTP_HOST}:{SMTP_PORT}")
@@ -574,6 +635,8 @@ class IMAPClient:
             }
             if cc_emails:
                 result["cc"] = cc_emails
+            if attached_files:
+                result["attachments"] = attached_files
             log.info(f"Ответ отправлен: to={reply_to}, cc={cc_emails}, тема: {subject}")
             return result
 
@@ -622,7 +685,8 @@ class IMAPClient:
 
     def send_email(self, to: str, subject: str, body: str,
                    cc: list[str] | None = None,
-                   attachment_urls: list[str] | None = None) -> dict:
+                   attachment_urls: list[str] | None = None,
+                   attachments_json: str | None = None) -> dict:
         """Отправить новое письмо.
 
         Args:
@@ -631,6 +695,7 @@ class IMAPClient:
             body: Текст письма (HTML)
             cc: Список CC получателей
             attachment_urls: Список URL файлов для вложения
+            attachments_json: JSON-список вложений с base64-содержимым
         """
         signature = (
             '<br><br><div style="border-top:1px solid #ccc;padding-top:10px;margin-top:10px;">'
@@ -680,6 +745,10 @@ class IMAPClient:
                     part["Content-Disposition"] = f'attachment; filename="{att["filename"]}"'
                     msg.attach(part)
                     downloaded_files.append(att["filename"])
+
+        # Вложения из base64 (attachments JSON)
+        b64_files = attach_base64_files(msg, attachments_json)
+        downloaded_files.extend(b64_files)
 
         # Отправка через SMTP
         try:

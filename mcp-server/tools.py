@@ -179,7 +179,8 @@ def register_tools(mcp):
     def send_reply(email_uid: str, body: str,
                    folder: str = "INBOX",
                    reply_all: bool = False,
-                   cc_override: str = "") -> str:
+                   cc_override: str = "",
+                   attachments: str = "") -> str:
         """Ответить на письмо. СНАЧАЛА вызови prepare_reply чтобы показать
         пользователю получателей и получить подтверждение.
 
@@ -193,6 +194,9 @@ def register_tools(mcp):
                        False = ответить только отправителю.
             cc_override: Если нужно изменить CC вручную — список email через запятую.
                          Пример: "a@mail.ru, b@mail.ru". Пустая строка = авто.
+            attachments: JSON-список вложений вида
+                         [{"filename": "f.pdf", "content_base64": "...", "mime_type": "application/pdf"}].
+                         Необязательно.
         """
         @_with_imap
         def _run(client: IMAPClient):
@@ -202,6 +206,7 @@ def register_tools(mcp):
             result = client.send_reply(
                 email_uid=email_uid, body=body, folder=folder,
                 reply_all=reply_all, cc_override=cc_list,
+                attachments_json=attachments or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -231,7 +236,8 @@ def register_tools(mcp):
     @mcp.tool()
     def send_new_email(to: str, subject: str, body: str,
                        cc: str = "",
-                       attachment_urls: str = "") -> str:
+                       attachment_urls: str = "",
+                       attachments: str = "") -> str:
         """Отправить новое письмо (не ответ, а самостоятельное).
         Подпись добавляется автоматически. Тело поддерживает HTML.
 
@@ -241,6 +247,9 @@ def register_tools(mcp):
             body: Текст письма (HTML разметка поддерживается)
             cc: Копия — email через запятую (необязательно)
             attachment_urls: URL файлов для вложения через запятую (прямые ссылки или Яндекс.Диск). Необязательно.
+            attachments: JSON-список вложений вида
+                         [{"filename": "f.pdf", "content_base64": "...", "mime_type": "application/pdf"}].
+                         Необязательно.
         """
         @_with_imap
         def _run(client: IMAPClient):
@@ -253,6 +262,7 @@ def register_tools(mcp):
             result = client.send_email(
                 to=to, subject=subject, body=body,
                 cc=cc_list, attachment_urls=urls_list,
+                attachments_json=attachments or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
