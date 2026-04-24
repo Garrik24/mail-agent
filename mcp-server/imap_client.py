@@ -21,6 +21,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.utils import parseaddr, formataddr, formatdate
 
+import attachment_storage
+
 log = logging.getLogger(__name__)
 
 IMAP_HOST = os.environ.get("MAIL_IMAP_HOST", "imap.mail.ru")
@@ -164,6 +166,54 @@ def attach_base64_files(msg: MIMEMultipart,
         added.append(filename)
         log.info(f"Добавлено вложение: {filename} ({len(content)} байт)")
     return added
+
+
+def attach_uploaded_files(msg: MIMEMultipart,
+                          attachment_ids_json: str | None) -> list[str]:
+    """Прикрепляет к msg файлы из chunked-upload хранилища по upload_id.
+
+    attachment_ids_json: JSON-список строк-UUID (upload_id), полученных через
+    attachment_upload_finish. Вложения читаются из хранилища, но НЕ удаляются —
+    удаление происходит у вызывающего после успешной SMTP-отправки.
+
+    Возвращает список upload_id, которые были прикреплены.
+    """
+    if not attachment_ids_json:
+        return []
+    try:
+        ids = json.loads(attachment_ids_json)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(f"attachment_ids должен быть JSON-списком: {e}")
+    if not isinstance(ids, list):
+        raise ValueError("attachment_ids должен быть JSON-списком")
+
+    used: list[str] = []
+    for upload_id in ids:
+        if not isinstance(upload_id, str):
+            raise ValueError(f"upload_id должен быть строкой: {upload_id!r}")
+        content, filename, mime_type = attachment_storage.read_attachment(
+            upload_id,
+        )
+
+        main_type, _, sub_type = mime_type.partition("/")
+        if not main_type or not sub_type:
+            main_type, sub_type = "application", "octet-stream"
+
+        part = MIMEBase(main_type, sub_type)
+        part.set_payload(content)
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=("utf-8", "", filename),
+        )
+        msg.attach(part)
+        used.append(upload_id)
+        log.info(
+            f"Прикреплён загруженный: {filename} "
+            f"({len(content)} байт, id={upload_id})"
+        )
+    return used
 
 
 def parse_email_message(msg: email.message.Message, uid: str = "") -> dict:
@@ -557,12 +607,14 @@ class IMAPClient:
                    folder: str = "INBOX",
                    reply_all: bool = False,
                    cc_override: list[str] | None = None,
-                   attachments_json: str | None = None) -> dict:
+                   attachments_json: str | None = None,
+                   attachment_ids_json: str | None = None) -> dict:
         """Ответить на письмо через SMTP.
 
         reply_all: если True — отвечает всем (To + CC оригинала)
         cc_override: если указан — используется вместо оригинальных CC
         attachments_json: JSON-список вложений с base64-содержимым.
+        attachment_ids_json: JSON-список upload_id из chunked-upload.
         """
         original = self.get_email_body(email_uid, folder)
         if "error" in original:
@@ -605,6 +657,7 @@ class IMAPClient:
         msg.attach(MIMEText(body, "plain", "utf-8"))
 
         attached_files = attach_base64_files(msg, attachments_json)
+        uploaded_ids = attach_uploaded_files(msg, attachment_ids_json)
 
         try:
             log.info(f"SMTP подключение: {SMTP_HOST}:{SMTP_PORT}")
@@ -628,6 +681,10 @@ class IMAPClient:
             # Сохраняем в Отправленные
             self._save_to_sent(msg)
 
+            # После успешной отправки удаляем использованные uploads
+            for uid in uploaded_ids:
+                attachment_storage.delete_attachment(uid)
+
             result = {
                 "status": "sent",
                 "to": reply_to,
@@ -637,6 +694,8 @@ class IMAPClient:
                 result["cc"] = cc_emails
             if attached_files:
                 result["attachments"] = attached_files
+            if uploaded_ids:
+                result["uploaded_attachments"] = uploaded_ids
             log.info(f"Ответ отправлен: to={reply_to}, cc={cc_emails}, тема: {subject}")
             return result
 
@@ -686,7 +745,8 @@ class IMAPClient:
     def send_email(self, to: str, subject: str, body: str,
                    cc: list[str] | None = None,
                    attachment_urls: list[str] | None = None,
-                   attachments_json: str | None = None) -> dict:
+                   attachments_json: str | None = None,
+                   attachment_ids_json: str | None = None) -> dict:
         """Отправить новое письмо.
 
         Args:
@@ -696,6 +756,7 @@ class IMAPClient:
             cc: Список CC получателей
             attachment_urls: Список URL файлов для вложения
             attachments_json: JSON-список вложений с base64-содержимым
+            attachment_ids_json: JSON-список upload_id из chunked-upload
         """
         signature = (
             '<br><br><div style="border-top:1px solid #ccc;padding-top:10px;margin-top:10px;">'
@@ -750,6 +811,9 @@ class IMAPClient:
         b64_files = attach_base64_files(msg, attachments_json)
         downloaded_files.extend(b64_files)
 
+        # Вложения из chunked-upload хранилища
+        uploaded_ids = attach_uploaded_files(msg, attachment_ids_json)
+
         # Отправка через SMTP
         try:
             all_recipients = [to]
@@ -774,6 +838,10 @@ class IMAPClient:
             # Сохраняем в Отправленные
             self._save_to_sent(msg)
 
+            # После успешной отправки удаляем использованные uploads
+            for uid in uploaded_ids:
+                attachment_storage.delete_attachment(uid)
+
             result = {
                 "status": "sent",
                 "to": to,
@@ -783,6 +851,8 @@ class IMAPClient:
                 result["cc"] = cc
             if downloaded_files:
                 result["attachments"] = downloaded_files
+            if uploaded_ids:
+                result["uploaded_attachments"] = uploaded_ids
             log.info(f"Письмо отправлено: to={to}, тема: {subject}")
             return result
 

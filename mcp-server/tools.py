@@ -6,6 +6,8 @@ import json
 import logging
 import smtplib
 import os
+
+import attachment_storage
 from imap_client import IMAPClient
 
 log = logging.getLogger(__name__)
@@ -180,7 +182,8 @@ def register_tools(mcp):
                    folder: str = "INBOX",
                    reply_all: bool = False,
                    cc_override: str = "",
-                   attachments: str = "") -> str:
+                   attachments: str = "",
+                   attachment_ids: str = "") -> str:
         """Ответить на письмо. СНАЧАЛА вызови prepare_reply чтобы показать
         пользователю получателей и получить подтверждение.
 
@@ -197,6 +200,11 @@ def register_tools(mcp):
             attachments: JSON-список вложений вида
                          [{"filename": "f.pdf", "content_base64": "...", "mime_type": "application/pdf"}].
                          Необязательно.
+            attachment_ids: JSON-список upload_id, полученных через
+                            attachment_upload_finish. Используй для файлов любого
+                            размера вместо передачи полного base64 в attachments
+                            (который ограничен размером tool call).
+                            Файлы удаляются после отправки.
         """
         @_with_imap
         def _run(client: IMAPClient):
@@ -207,6 +215,7 @@ def register_tools(mcp):
                 email_uid=email_uid, body=body, folder=folder,
                 reply_all=reply_all, cc_override=cc_list,
                 attachments_json=attachments or None,
+                attachment_ids_json=attachment_ids or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -237,7 +246,8 @@ def register_tools(mcp):
     def send_new_email(to: str, subject: str, body: str,
                        cc: str = "",
                        attachment_urls: str = "",
-                       attachments: str = "") -> str:
+                       attachments: str = "",
+                       attachment_ids: str = "") -> str:
         """Отправить новое письмо (не ответ, а самостоятельное).
         Подпись добавляется автоматически. Тело поддерживает HTML.
 
@@ -250,6 +260,11 @@ def register_tools(mcp):
             attachments: JSON-список вложений вида
                          [{"filename": "f.pdf", "content_base64": "...", "mime_type": "application/pdf"}].
                          Необязательно.
+            attachment_ids: JSON-список upload_id, полученных через
+                            attachment_upload_finish. Используй для файлов любого
+                            размера вместо передачи полного base64 в attachments
+                            (который ограничен размером tool call).
+                            Файлы удаляются после отправки.
         """
         @_with_imap
         def _run(client: IMAPClient):
@@ -263,9 +278,66 @@ def register_tools(mcp):
                 to=to, subject=subject, body=body,
                 cc=cc_list, attachment_urls=urls_list,
                 attachments_json=attachments or None,
+                attachment_ids_json=attachment_ids or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
+
+    @mcp.tool()
+    def attachment_upload_start(filename: str,
+                                mime_type: str = "application/octet-stream") -> str:
+        """Начать chunked-загрузку вложения. Используй, когда файл не помещается
+        в один tool call (больше ~60 КБ с учётом base64).
+
+        Далее:
+          1) режь base64-содержимое файла на куски по ~50000 символов;
+          2) вызывай attachment_upload_chunk(upload_id, chunk_base64) для каждого;
+          3) вызови attachment_upload_finish(upload_id);
+          4) передай upload_id в send_new_email/send_reply через параметр
+             attachment_ids (JSON-список). Файл удалится после отправки.
+
+        Сессия хранится 60 минут, лимит на файл — 25 МБ.
+
+        Args:
+            filename: Имя файла (например, "КП_Форелевый.pdf")
+            mime_type: MIME-тип (например, "application/pdf")
+        """
+        try:
+            result = attachment_storage.start_upload(filename, mime_type)
+        except Exception as e:
+            result = {"error": str(e)}
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    @mcp.tool()
+    def attachment_upload_chunk(upload_id: str, chunk_base64: str) -> str:
+        """Передать очередной кусок base64-строки. Куски НЕ декодируются —
+        просто конкатенируются на диске. Рекомендуемый размер куска — 50000 символов.
+
+        Args:
+            upload_id: ID сессии из attachment_upload_start
+            chunk_base64: Кусок base64 (без пробелов/переносов — как есть)
+        """
+        try:
+            result = attachment_storage.append_chunk(upload_id, chunk_base64)
+        except Exception as e:
+            result = {"upload_id": upload_id, "status": "error", "error": str(e)}
+        return json.dumps(result, ensure_ascii=False, indent=2)
+
+    @mcp.tool()
+    def attachment_upload_finish(upload_id: str) -> str:
+        """Финализировать chunked-загрузку: декодировать накопленный base64,
+        проверить размер и подготовить файл для прикрепления к письму.
+        После успеха upload_id можно передавать в send_new_email/send_reply
+        через параметр attachment_ids.
+
+        Args:
+            upload_id: ID сессии
+        """
+        try:
+            result = attachment_storage.finish_upload(upload_id)
+        except Exception as e:
+            result = {"upload_id": upload_id, "status": "error", "error": str(e)}
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     @mcp.tool()
     def get_folders() -> str:
