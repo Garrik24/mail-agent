@@ -1,0 +1,19 @@
+[phases.setup]
+# Системные библиотеки для WeasyPrint (рендер HTML -> PDF без браузера).
+# Для WeasyPrint >= 60 обязательны libpangoft2 и libharfbuzz-subset0
+# (раскладка текста + сабсеттинг шрифтов). cairo/gdk-pixbuf держим для
+# обратной совместимости. fonts-liberation — Times-совместимый шрифт с кириллицей.
+aptPkgs = [
+  "libpango-1.0-0",
+  "libpangoft2-1.0-0",
+  "libharfbuzz-subset0",
+  "libpangocairo-1.0-0",
+  "libgdk-pixbuf-2.0-0",
+  "libcairo2",
+  "libffi-dev",
+  "shared-mime-info",
+  "fonts-liberation"
+]
+# Если какой-то пакет не найдётся — это различие версий Debian/Ubuntu:
+#   libgdk-pixbuf-2.0-0  <->  libgdk-pixbuf2.0-0
+# Поставить тот, что доступен в базовом образе.

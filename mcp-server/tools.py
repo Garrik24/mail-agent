@@ -340,6 +340,110 @@ def register_tools(mcp):
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     @mcp.tool()
+    def send_letter(
+        to: str,
+        subject: str,
+        addressee: str,
+        isx_number: str,
+        date_str: str,
+        body: str,
+        salutation: str = "",
+        yadisk_url: str = "",
+        appendix: str = "",
+        cc: str = "",
+        email_body: str = "",
+        pdf_filename: str = "Письмо.pdf",
+        executor: str = "Виктория",
+        executor_phone: str = "8 (938) 350-74-00",
+        attach_pdf: bool = True,
+    ) -> str:
+        """
+        Собрать письмо на фирменном бланке ООО «Ставропольгеодезия» (с печатью и подписью)
+        и отправить его. Клиент передаёт ТОЛЬКО текст — PDF рендерится на сервере.
+
+        Args:
+            to: email получателя (несколько — через запятую).
+            subject: тема письма (она же — заголовок по центру в самом письме).
+            addressee: блок адресата, строки через перенос '\\n'.
+                Пример: "Генеральному директору\\nАО «Ставропольгоргаз»\\nБалахтину Р.В.\\nул. Маяковского, 9, г. Ставрополь".
+            isx_number: исходящий номер, например "150".
+            date_str: дата в готовом виде, например "«03» июня 2026 г.".
+            body: JSON-список абзацев. Каждый абзац — {"text": "...", "italic": false}.
+                italic=true — для абзаца, который надо выделить курсивом (например, описание объекта/линии).
+                Можно передать и обычную строку: абзацы разобьются по пустой строке.
+            salutation: обращение по центру (например "Уважаемый Роман Витальевич!"). Пусто = без обращения.
+            yadisk_url: ссылка на материалы (Я.Диск). Если задана — добавится отдельной строкой и в тело письма.
+            appendix: текст после слова "Приложение:". Пусто = блок не выводится.
+            cc: копия (несколько — через запятую). Для рассылок согласований сюда обычно arsenal57737@mail.ru.
+            email_body: HTML-тело письма-сопроводиловки. Пусто = соберётся автоматически.
+            pdf_filename: имя файла вложения.
+            executor / executor_phone: исполнитель и телефон в подвале письма.
+            attach_pdf: прикладывать ли собранный PDF (по умолчанию да).
+
+        Returns:
+            JSON-строка с результатом отправки.
+        """
+        # --- разбор абзацев ---
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, list):
+                paragraphs = [p if isinstance(p, dict) else {"text": str(p)} for p in parsed]
+            elif isinstance(parsed, str):
+                paragraphs = [{"text": t} for t in parsed.split("\n\n") if t.strip()]
+            else:
+                paragraphs = [{"text": str(parsed)}]
+        except Exception:
+            paragraphs = [{"text": t} for t in body.split("\n\n") if t.strip()]
+
+        # --- рендер PDF (WeasyPrint импортируем лениво: если системные
+        #     библиотеки не готовы, упадёт только этот инструмент, не весь сервер) ---
+        try:
+            from letter_render import render_letter_pdf
+            pdf = render_letter_pdf(
+                addressee=addressee,
+                isx_number=isx_number,
+                date_str=date_str,
+                subject=subject,
+                salutation=salutation,
+                paragraphs=paragraphs,
+                yadisk_url=yadisk_url,
+                appendix=appendix,
+                executor=executor,
+                executor_phone=executor_phone,
+            )
+        except Exception as e:
+            log.error(f"Ошибка сборки PDF письма: {e}")
+            return json.dumps(
+                {"error": f"Не удалось собрать PDF письма: {e}"},
+                ensure_ascii=False,
+            )
+
+        # --- тело письма по умолчанию ---
+        if not email_body:
+            link_html = (f'<br><br>Материалы топографической съёмки: '
+                         f'<a href="{yadisk_url}">{yadisk_url}</a>') if yadisk_url else ""
+            email_body = (
+                "Здравствуйте!<br><br>"
+                f"Направляем официальное письмо ООО «Ставропольгеодезия» "
+                f"(исх. № {isx_number} от {date_str}) — во вложении (PDF).{link_html}<br><br>"
+                "Ответ просим направить на адрес электронной почты stavgeo26@mail.ru."
+            )
+
+        # --- отправка (своя, без автоподписи — подпись/печать уже в PDF) ---
+        cc_list = None
+        if cc.strip():
+            cc_list = [e.strip() for e in cc.split(",") if e.strip()]
+
+        @_with_imap
+        def _run(client: IMAPClient):
+            result = client.send_letter_email(
+                to=to, subject=subject, html_body=email_body, cc=cc_list,
+                pdf_bytes=(pdf if attach_pdf else None), pdf_filename=pdf_filename,
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
+        return _run()
+
+    @mcp.tool()
     def get_folders() -> str:
         """Получить список всех папок почтового ящика."""
         @_with_imap

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 20mm 15mm 20mm 30mm; } /* верх право низ лево (ГОСТ-поля) */
+  * { box-sizing: border-box; }
+  body { font-family: "Liberation Serif", "Times New Roman", serif; font-size: 12pt; color: #000; line-height: 1.3; margin: 0; }
+
+  .letterhead { border-bottom: 1px solid #000; padding-bottom: 3px; }
+  .letterhead .name { font-weight: bold; font-size: 11pt; }
+  .letterhead .req { font-size: 9pt; }
+
+  .addressee { width: 55%; margin-left: 45%; margin-top: 14pt; text-align: right; }
+
+  .isx { margin-top: 14pt; }
+  .subject { text-align: center; font-weight: bold; margin: 14pt 0; }
+  .salutation { text-align: center; font-weight: bold; margin: 0 0 14pt 0; }
+
+  p.b { text-align: justify; text-indent: 1.27cm; margin: 0 0 8pt 0; } /* красная строка ~0.5" */
+  p.b.italic { font-style: italic; }
+
+  .link { text-indent: 1.27cm; margin: 0 0 8pt 0; word-break: break-all; }
+  .appendix { text-align: justify; margin: 6pt 0 22pt 0; }
+
+  /* подпись + печать */
+  .signature { position: relative; }
+  table.sigrow { width: 100%; border-collapse: collapse; }
+  table.sigrow td { border: none; padding: 0; vertical-align: top; }
+  .stamp { position: absolute; left: 58mm; top: -7mm; width: 46mm; height: auto; z-index: -1; } /* z-index:-1 => печать ЗА текстом */
+
+  .executor { font-size: 9pt; margin-top: 34pt; }
+</style>
+</head>
+<body>
+  <div class="letterhead">
+    <div class="name">ООО «Ставропольгеодезия»</div>
+    <div class="req">ОГРН 1182651013786 · ИНН 2634103024 · КПП 263401001</div>
+    <div class="req">355002, г. Ставрополь, ул. Тельмана, д. 41, оф. 37</div>
+    <div class="req">тел. 8 (938) 350-74-00 · e-mail: stavgeo26@mail.ru · сайт: ставропольгеодезия.рф</div>
+  </div>
+
+  <div class="addressee">
+    {% for line in addressee_lines %}<div>{{ line }}</div>{% endfor %}
+  </div>
+
+  <div class="isx">Исх. № {{ isx_number }} от {{ date_str }}</div>
+
+  <div class="subject">{{ subject }}</div>
+
+  {% if salutation %}<div class="salutation">{{ salutation }}</div>{% endif %}
+
+  {% for p in paragraphs %}
+    <p class="b{% if p.italic %} italic{% endif %}">{{ p.text }}</p>
+  {% endfor %}
+
+  {% if yadisk_url %}<div class="link"><a href="{{ yadisk_url }}">{{ yadisk_url }}</a></div>{% endif %}
+
+  {% if appendix %}<div class="appendix"><b>Приложение:</b> {{ appendix }}</div>{% endif %}
+
+  <div class="signature">
+    <div>Генеральный директор</div>
+    <table class="sigrow"><tr>
+      <td>ООО «Ставропольгеодезия»</td>
+      <td style="text-align:right">И.А. Коровко</td>
+    </tr></table>
+    {% if stamp %}<img class="stamp" src="{{ stamp }}">{% endif %}
+  </div>
+
+  <div class="executor">Исполнитель: {{ executor }}<br>тел. {{ executor_phone }}</div>
+</body>
+</html>

@@ -859,3 +859,81 @@ class IMAPClient:
         except Exception as e:
             log.error(f"Ошибка отправки: {e}")
             return {"error": str(e)}
+
+    def send_letter_email(self, to: str, subject: str, html_body: str,
+                          cc: list[str] | None = None,
+                          pdf_bytes: bytes | None = None,
+                          pdf_filename: str = "Письмо.pdf") -> dict:
+        """Отправить письмо с готовым PDF-вложением (официальный бланк).
+
+        В отличие от send_email НЕ добавляет автоподпись и блок
+        конфиденциальности — html_body отправляется как есть
+        (подпись/печать уже внутри PDF). Креды, From и сохранение в
+        «Отправленные» переиспользуются из общей SMTP-логики.
+
+        Args:
+            to: Email получателя
+            subject: Тема письма
+            html_body: HTML-тело письма-сопроводиловки (как есть, без автоподписи)
+            cc: Список CC получателей
+            pdf_bytes: Готовые байты PDF (None — отправить без вложения)
+            pdf_filename: Имя файла вложения (поддерживается кириллица)
+        """
+        msg = MIMEMultipart("mixed")
+        msg["From"] = formataddr(("ООО Ставропольгеодезия", MAIL_USER))
+        msg["To"] = to
+        msg["Subject"] = subject
+        msg["Date"] = formatdate(localtime=True)
+        if cc:
+            msg["Cc"] = ", ".join(cc)
+
+        msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+        if pdf_bytes:
+            part = MIMEApplication(pdf_bytes, _subtype="pdf")
+            # 3-кортеж (charset, lang, value) => корректное RFC 2231
+            # кодирование имени файла с кириллицей.
+            part.add_header(
+                "Content-Disposition", "attachment",
+                filename=("utf-8", "", pdf_filename),
+            )
+            msg.attach(part)
+
+        try:
+            all_recipients = [to]
+            if cc:
+                all_recipients.extend(cc)
+
+            log.info(f"SMTP: отправка письма-бланка -> {to}, тема: {subject}")
+            if SMTP_PORT == 465:
+                smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)
+                smtp.ehlo()
+            else:
+                smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            try:
+                smtp.login(MAIL_USER, MAIL_PASS)
+                smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
+            finally:
+                smtp.quit()
+
+            # Сохраняем в Отправленные
+            self._save_to_sent(msg)
+
+            result = {
+                "status": "sent",
+                "to": to,
+                "subject": subject,
+            }
+            if cc:
+                result["cc"] = cc
+            if pdf_bytes:
+                result["attachment"] = pdf_filename
+            log.info(f"Письмо-бланк отправлено: to={to}, тема: {subject}")
+            return result
+
+        except Exception as e:
+            log.error(f"Ошибка отправки письма-бланка: {e}")
+            return {"error": str(e)}
