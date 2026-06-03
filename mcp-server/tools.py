@@ -13,6 +13,45 @@ from imap_client import IMAPClient
 log = logging.getLogger(__name__)
 
 
+def _public_base_url() -> str:
+    """Публичный базовый URL сервиса для ссылок предпросмотра.
+
+    Приоритет: явный PUBLIC_BASE_URL -> авто-домен Railway (RAILWAY_PUBLIC_DOMAIN)
+    -> известный прод-домен как запасной вариант.
+    """
+    base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if base:
+        return base
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+    if domain:
+        return f"https://{domain}"
+    return "https://mail-mcp-server-production.up.railway.app"
+
+
+def _render_letter_pdf(*, body, addressee, isx_number, date_str, subject,
+                       salutation, yadisk_url, appendix, executor,
+                       executor_phone) -> bytes:
+    """Единый рендер PDF письма для send_letter и preview_letter.
+
+    WeasyPrint импортируется лениво: если системные библиотеки не готовы,
+    упадёт только конкретный инструмент, а не весь сервер.
+    """
+    from letter_render import render_letter_pdf, parse_paragraphs
+    paragraphs = parse_paragraphs(body)
+    return render_letter_pdf(
+        addressee=addressee,
+        isx_number=isx_number,
+        date_str=date_str,
+        subject=subject,
+        salutation=salutation,
+        paragraphs=paragraphs,
+        yadisk_url=yadisk_url,
+        appendix=appendix,
+        executor=executor,
+        executor_phone=executor_phone,
+    )
+
+
 def register_tools(mcp):
     """Регистрирует все MCP инструменты на экземпляре FastMCP."""
 
@@ -340,6 +379,69 @@ def register_tools(mcp):
         return json.dumps(result, ensure_ascii=False, indent=2)
 
     @mcp.tool()
+    def preview_letter(
+        subject: str,
+        addressee: str,
+        isx_number: str,
+        date_str: str,
+        body: str,
+        salutation: str = "",
+        yadisk_url: str = "",
+        appendix: str = "",
+        pdf_filename: str = "Письмо.pdf",
+        executor: str = "Виктория",
+        executor_phone: str = "8 (938) 350-74-00",
+    ) -> str:
+        """
+        Собрать PDF письма на фирменном бланке ООО «Ставропольгеодезия» и вернуть
+        ССЫЛКУ для предпросмотра — БЕЗ отправки. Используй ПЕРЕД send_letter:
+        покажи ссылку пользователю, чтобы он глазами проверил вёрстку, текст и
+        положение печати/подписи. Отправляй send_letter только после явного «да».
+
+        Параметры — те же контентные поля, что у send_letter (без to/cc/email_body):
+        тот же текст даст тот же PDF. Ссылка действует ~60 минут.
+
+        Args:
+            subject: тема письма (она же — заголовок по центру в самом письме).
+            addressee: блок адресата, строки через перенос '\\n'.
+            isx_number: исходящий номер, например "150".
+            date_str: дата в готовом виде, например "«03» июня 2026 г.".
+            body: JSON-список абзацев {"text": "...", "italic": false} или обычный текст.
+            salutation: обращение по центру. Пусто = без обращения.
+            yadisk_url: ссылка на материалы (Я.Диск). Пусто = не выводится.
+            appendix: текст после слова "Приложение:". Пусто = блок не выводится.
+            pdf_filename: имя файла (влияет на имя при открытии PDF).
+            executor / executor_phone: исполнитель и телефон в подвале письма.
+
+        Returns:
+            JSON со ссылкой preview_url (открыть в браузере), сроком жизни и размером PDF.
+        """
+        try:
+            pdf = _render_letter_pdf(
+                body=body, addressee=addressee, isx_number=isx_number,
+                date_str=date_str, subject=subject, salutation=salutation,
+                yadisk_url=yadisk_url, appendix=appendix, executor=executor,
+                executor_phone=executor_phone,
+            )
+        except Exception as e:
+            log.error(f"Ошибка сборки PDF предпросмотра: {e}")
+            return json.dumps(
+                {"error": f"Не удалось собрать PDF: {e}"}, ensure_ascii=False,
+            )
+
+        import preview_store
+        token = preview_store.save_preview(pdf, pdf_filename)
+        url = f"{_public_base_url()}/preview/{token}.pdf"
+        return json.dumps({
+            "preview_url": url,
+            "expires_in_min": preview_store.TTL_SECONDS // 60,
+            "pdf_size_bytes": len(pdf),
+            "hint": ("Покажи эту ссылку пользователю для проверки бланка "
+                     "(текст, вёрстка, печать). После подтверждения вызови "
+                     "send_letter с теми же контентными полями плюс to/cc."),
+        }, ensure_ascii=False, indent=2)
+
+    @mcp.tool()
     def send_letter(
         to: str,
         subject: str,
@@ -360,6 +462,10 @@ def register_tools(mcp):
         """
         Собрать письмо на фирменном бланке ООО «Ставропольгеодезия» (с печатью и подписью)
         и отправить его. Клиент передаёт ТОЛЬКО текст — PDF рендерится на сервере.
+
+        ВАЖНО: перед отправкой сначала вызови preview_letter с теми же контентными
+        полями, покажи пользователю ссылку и дождись подтверждения, что вёрстка,
+        текст и положение печати корректны. send_letter вызывай только после «да».
 
         Args:
             to: email получателя (несколько — через запятую).
@@ -383,32 +489,12 @@ def register_tools(mcp):
         Returns:
             JSON-строка с результатом отправки.
         """
-        # --- разбор абзацев ---
+        # --- рендер PDF (общий с preview_letter) ---
         try:
-            parsed = json.loads(body)
-            if isinstance(parsed, list):
-                paragraphs = [p if isinstance(p, dict) else {"text": str(p)} for p in parsed]
-            elif isinstance(parsed, str):
-                paragraphs = [{"text": t} for t in parsed.split("\n\n") if t.strip()]
-            else:
-                paragraphs = [{"text": str(parsed)}]
-        except Exception:
-            paragraphs = [{"text": t} for t in body.split("\n\n") if t.strip()]
-
-        # --- рендер PDF (WeasyPrint импортируем лениво: если системные
-        #     библиотеки не готовы, упадёт только этот инструмент, не весь сервер) ---
-        try:
-            from letter_render import render_letter_pdf
-            pdf = render_letter_pdf(
-                addressee=addressee,
-                isx_number=isx_number,
-                date_str=date_str,
-                subject=subject,
-                salutation=salutation,
-                paragraphs=paragraphs,
-                yadisk_url=yadisk_url,
-                appendix=appendix,
-                executor=executor,
+            pdf = _render_letter_pdf(
+                body=body, addressee=addressee, isx_number=isx_number,
+                date_str=date_str, subject=subject, salutation=salutation,
+                yadisk_url=yadisk_url, appendix=appendix, executor=executor,
                 executor_phone=executor_phone,
             )
         except Exception as e:

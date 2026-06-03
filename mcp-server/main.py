@@ -44,6 +44,46 @@ async def health_response(scope, receive, send):
     })
 
 
+async def preview_response(scope, receive, send):
+    """Отдаёт PDF предпросмотра письма (inline в браузере) по токену.
+
+    Путь: /preview/<token>.pdf — токен выдаётся инструментом preview_letter.
+    Ничего не отправляет; только показывает уже отрендеренный бланк.
+    """
+    import preview_store
+    from urllib.parse import quote
+
+    token = scope.get("path", "")[len("/preview/"):]
+    if token.endswith(".pdf"):
+        token = token[:-4]
+
+    item = preview_store.load_preview(token)
+    if not item:
+        await send({
+            "type": "http.response.start",
+            "status": 404,
+            "headers": [[b"content-type", b"text/plain; charset=utf-8"]],
+        })
+        await send({
+            "type": "http.response.body",
+            "body": "Предпросмотр не найден или устарел (ссылка живёт ~1 час).".encode("utf-8"),
+        })
+        return
+
+    pdf, filename = item
+    disposition = f"inline; filename*=UTF-8''{quote(filename)}".encode("ascii")
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            [b"content-type", b"application/pdf"],
+            [b"content-disposition", disposition],
+            [b"cache-control", b"no-store"],
+        ],
+    })
+    await send({"type": "http.response.body", "body": pdf})
+
+
 # Получаем MCP ASGI app
 mcp_asgi = mcp.streamable_http_app()
 
@@ -68,6 +108,8 @@ async def app(scope, receive, send):
                     return
     elif scope["type"] == "http" and scope.get("path") == "/health":
         await health_response(scope, receive, send)
+    elif scope["type"] == "http" and scope.get("path", "").startswith("/preview/"):
+        await preview_response(scope, receive, send)
     else:
         await mcp_asgi(scope, receive, send)
 

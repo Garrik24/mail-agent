@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Сборка письма на фирменном бланке: HTML-шаблон -> PDF (WeasyPrint)."""
 import os
+import json
 import base64
 import mimetypes
 from jinja2 import Template
@@ -25,6 +26,24 @@ def _data_uri(path: str) -> str:
 
 with open(TEMPLATE_PATH, encoding="utf-8") as _f:
     _TEMPLATE = Template(_f.read())
+
+
+def parse_paragraphs(body: str) -> list:
+    """Разбирает поле body в список абзацев [{"text": ..., "italic": bool}].
+
+    Принимает: JSON-список объектов/строк, JSON-строку или обычный текст
+    (в последнем случае абзацы делятся по пустой строке). Единая точка разбора —
+    чтобы preview_letter и send_letter собирали идентичный PDF.
+    """
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return [{"text": t} for t in body.split("\n\n") if t.strip()]
+    if isinstance(parsed, list):
+        return [p if isinstance(p, dict) else {"text": str(p)} for p in parsed]
+    if isinstance(parsed, str):
+        return [{"text": t} for t in parsed.split("\n\n") if t.strip()]
+    return [{"text": str(parsed)}]
 
 
 def render_letter_pdf(*, addressee: str, isx_number: str, date_str: str, subject: str,
