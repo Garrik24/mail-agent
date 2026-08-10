@@ -12,7 +12,12 @@ aptPkgs = [
   "libcairo2",
   "libffi-dev",
   "shared-mime-info",
-  "fonts-liberation"
+  "fonts-liberation",
+  # OCR сканов во вложениях: движок, русская модель и декодер JBIG2,
+  # которым сжимают чёрно-белые сканы.
+  "tesseract-ocr",
+  "tesseract-ocr-rus",
+  "jbig2dec"
 ]
 # Если какой-то пакет не найдётся — это различие версий Debian/Ubuntu:
 #   libgdk-pixbuf-2.0-0  <->  libgdk-pixbuf2.0-0

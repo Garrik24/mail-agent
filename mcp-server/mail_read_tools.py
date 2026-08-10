@@ -25,6 +25,8 @@ log = logging.getLogger(__name__)
 MAX_BATCH = 30
 # Тело короче этого считаем пустым и идём искать текст во вложении
 EMPTY_BODY_THRESHOLD = 100
+# Сколько страниц скана распознавать в пакетном режиме
+BATCH_OCR_MAX_PAGES = 2
 
 UID_HINT = ("проверь, что UID получен из search_mail и указана верная папка "
             "(список папок — list_folders)")
@@ -52,7 +54,8 @@ def _fetch_message(imap, uid: str, folder: str):
 
 def _get_attachment_text_impl(email_uid: str, folder: str = "INBOX",
                               attachment_name: str = "",
-                              max_chars: int = 5000) -> dict:
+                              max_chars: int = 5000,
+                              ocr: str = "auto") -> dict:
     valid, invalid = validate_uids([email_uid])
     if invalid:
         return {"ok": False,
@@ -76,7 +79,8 @@ def _get_attachment_text_impl(email_uid: str, folder: str = "INBOX",
         return {"ok": False, "reason": "У письма нет вложений"}
 
     result = mail_read.extract_attachment_text(
-        found["filename"], found["content_type"], found["data"], max_chars)
+        found["filename"], found["content_type"], found["data"], max_chars,
+        ocr=ocr)
     result["uid"] = valid[0]
     result["filename"] = found["filename"]
     result["content_type"] = found["content_type"]
@@ -85,7 +89,7 @@ def _get_attachment_text_impl(email_uid: str, folder: str = "INBOX",
 
 
 def _summarize(msg, uid: str, flags: list[str], max_chars_each: int,
-               include_attachment_text: bool) -> dict:
+               include_attachment_text: bool, ocr: str = "auto") -> dict:
     """Компактная сводка по письму: содержание из тела либо из вложения."""
     body = mail_read.extract_body(msg)
     own, _ = mail_read.split_quotes(body["text"])
@@ -96,9 +100,11 @@ def _summarize(msg, uid: str, flags: list[str], max_chars_each: int,
     if include_attachment_text and len(own.strip()) < EMPTY_BODY_THRESHOLD:
         found = mail_read.find_attachment(msg)
         if found and found["filename"].lower().endswith((".pdf", ".docx")):
+            # В пачке распознаём не больше двух страниц на письмо: иначе
+            # разбор 30 сканов растянется на минуты.
             extracted = mail_read.extract_attachment_text(
                 found["filename"], found["content_type"], found["data"],
-                max_chars_each)
+                max_chars_each, ocr=ocr, ocr_max_pages=BATCH_OCR_MAX_PAGES)
             if extracted.get("ok"):
                 text = extracted["text"]
                 source = f"attachment:{found['filename']}"
@@ -123,7 +129,8 @@ def _summarize(msg, uid: str, flags: list[str], max_chars_each: int,
 
 def _read_messages_impl(email_uids, folder: str = "INBOX",
                         max_chars_each: int = 800,
-                        include_attachment_text: bool = True) -> dict:
+                        include_attachment_text: bool = True,
+                        ocr: str = "auto") -> dict:
     valid, invalid = validate_uids(email_uids)
     if invalid:
         return {"error": f"UID должны состоять только из цифр: {invalid}; "
@@ -143,7 +150,7 @@ def _read_messages_impl(email_uids, folder: str = "INBOX",
             try:
                 msg, flags = _fetch_message(imap, uid, folder)
                 messages.append(_summarize(msg, uid, flags, max_chars_each,
-                                           include_attachment_text))
+                                           include_attachment_text, ocr))
             except Exception as exc:
                 log.warning(f"read_messages: UID {uid} не прочитан: {exc}")
                 messages.append({"uid": uid, "error": str(exc)})
@@ -162,23 +169,27 @@ def register_tools(mcp):
     @mcp.tool()
     def get_attachment_text(email_uid: str, folder: str = "INBOX",
                             attachment_name: str = "",
-                            max_chars: int = 5000) -> dict:
+                            max_chars: int = 5000,
+                            ocr: str = "auto") -> dict:
         """Извлечь текст из вложения письма (PDF, DOCX, текстовые файлы).
 
         Нужен, когда тело письма пустое, а всё содержание — во вложении:
         так приходят ответы ресурсоснабжающих организаций и ведомств.
-        Если в PDF нет текстового слоя (скан), вернётся ok=false с причиной —
-        распознавание изображений не выполняется.
+        Если в PDF нет текстового слоя (скан), текст распознаётся через OCR
+        (русский + английский, до 5 страниц); поле source покажет text-layer
+        или ocr.
 
         Args:
             email_uid: UID письма (из search_mail), только цифры
             folder: Папка, обычное имя, можно кириллицей
             attachment_name: Имя вложения; пусто — первый PDF или DOCX
             max_chars: Максимум символов текста
+            ocr: "auto" — распознавать скан, если текстового слоя нет;
+                 "off" — только текстовый слой
         """
         try:
             return _get_attachment_text_impl(email_uid, folder,
-                                             attachment_name, max_chars)
+                                             attachment_name, max_chars, ocr)
         except Exception as exc:
             log.error(f"get_attachment_text: {exc}")
             return {"ok": False, "reason": str(exc)}
@@ -186,7 +197,8 @@ def register_tools(mcp):
     @mcp.tool()
     def read_messages(email_uids: list[str], folder: str = "INBOX",
                       max_chars_each: int = 800,
-                      include_attachment_text: bool = True) -> dict:
+                      include_attachment_text: bool = True,
+                      ocr: str = "auto") -> dict:
         """Прочитать пачку писем разом и получить по каждому краткую сводку.
 
         По письму возвращается UID, дата, отправитель, тема, флаги, имена
@@ -203,10 +215,12 @@ def register_tools(mcp):
             folder: Папка, обычное имя, можно кириллицей
             max_chars_each: Максимум символов содержания на письмо
             include_attachment_text: Доставать текст из вложения, если тело пустое
+            ocr: "auto" — распознавать сканы (до 2 страниц на письмо),
+                 "off" — не распознавать, так быстрее
         """
         try:
             return _read_messages_impl(email_uids, folder, max_chars_each,
-                                       include_attachment_text)
+                                       include_attachment_text, ocr)
         except Exception as exc:
             log.error(f"read_messages: {exc}")
             return {"error": str(exc)}

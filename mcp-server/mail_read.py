@@ -22,7 +22,8 @@ log = logging.getLogger(__name__)
 __all__ = ["decode_mime_header", "html_to_text", "split_quotes", "truncate",
            "extract_body", "list_attachments", "parse_flags_list", "part_filename",
            "build_message_dict", "find_attachment", "extract_pdf_text",
-           "extract_docx_text", "extract_attachment_text"]
+           "extract_docx_text", "extract_attachment_text", "ocr_pdf",
+           "ocr_available", "pdf_page_images"]
 
 # Куски письма, после которых начинается процитированная переписка
 _QUOTE_MARKERS = (
@@ -350,8 +351,14 @@ def find_attachment(msg: email.message.Message, name: str = "") -> dict | None:
     return candidates[0]
 
 
-def extract_pdf_text(data: bytes, max_chars: int = 5000) -> dict:
-    """Текст из PDF через pypdf. Скан без текстового слоя честно помечается."""
+def extract_pdf_text(data: bytes, max_chars: int = 5000, ocr: str = "auto",
+                     ocr_max_pages: int = 5) -> dict:
+    """Текст из PDF через pypdf, со скана — через OCR.
+
+    ocr="auto" (по умолчанию): если текстового слоя нет, включается
+    распознавание. ocr="off" — только текстовый слой, как раньше.
+    Поле source в ответе показывает, откуда взят текст: text-layer или ocr.
+    """
     try:
         from pypdf import PdfReader
     except ImportError as exc:
@@ -375,12 +382,105 @@ def extract_pdf_text(data: bytes, max_chars: int = 5000) -> dict:
         return {"ok": False, "reason": f"не удалось прочитать PDF: {exc}"}
 
     if len(re.sub(r"\s", "", text)) < 20:
-        return {"ok": False, "reason": "нет текстового слоя, вероятно скан",
-                "pages": page_count}
+        if ocr == "off":
+            return {"ok": False, "reason": "нет текстового слоя, вероятно скан",
+                    "pages": page_count}
+        result = ocr_pdf(data, max_chars=max_chars, max_pages=ocr_max_pages)
+        result["pages"] = page_count
+        return result
 
     text, truncated = truncate(_MANY_BLANKS_RE.sub("\n\n", text), max_chars)
     return {"ok": True, "text": text, "truncated": truncated,
-            "pages": page_count}
+            "pages": page_count, "source": "text-layer"}
+
+
+# Скан А4 распознаётся примерно за 1–3 секунды на страницу, поэтому число
+# страниц ограничено: инструмент должен отвечать, а не молчать минуту.
+OCR_LANG = "rus+eng"
+OCR_PAGE_TIMEOUT = 40
+OCR_MAX_PAGES = 5
+
+
+def ocr_available() -> tuple[bool, str]:
+    """Проверяет, что OCR можно выполнить: библиотеки и сам tesseract."""
+    try:
+        import pytesseract  # noqa: F401
+        from PIL import Image  # noqa: F401
+    except ImportError as exc:
+        return False, f"OCR недоступен, нет библиотеки: {exc}"
+    try:
+        import pytesseract
+        pytesseract.get_tesseract_version()
+    except Exception as exc:
+        return False, f"OCR недоступен, tesseract не запускается: {exc}"
+    return True, ""
+
+
+def pdf_page_images(data: bytes, max_pages: int = OCR_MAX_PAGES) -> list:
+    """Достаёт картинки страниц из PDF без poppler — через pypdf + Pillow.
+
+    У сканов страница обычно и есть одна большая картинка. Битые объекты
+    пропускаются: одна нечитаемая картинка не должна ронять распознавание
+    всего документа.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    images = []
+    for page in reader.pages[:max_pages]:
+        try:
+            for item in page.images:
+                if item.image is not None:
+                    images.append(item.image)
+        except Exception as exc:
+            log.warning(f"Не удалось извлечь картинки страницы: {exc}")
+    return images
+
+
+def ocr_pdf(data: bytes, max_chars: int = 5000,
+            max_pages: int = OCR_MAX_PAGES, lang: str = OCR_LANG) -> dict:
+    """Распознаёт текст со сканированного PDF (tesseract, rus+eng)."""
+    available, reason = ocr_available()
+    if not available:
+        return {"ok": False,
+                "reason": f"нет текстового слоя, вероятно скан; {reason}"}
+
+    import pytesseract
+
+    try:
+        images = pdf_page_images(data, max_pages)
+    except Exception as exc:
+        return {"ok": False,
+                "reason": f"нет текстового слоя; картинки страниц не извлеклись: {exc}"}
+
+    if not images:
+        return {"ok": False,
+                "reason": "нет текстового слоя и нет картинок страниц — "
+                          "возможно, PDF в формате, который не разбирается "
+                          "(например JBIG2 без jbig2dec)"}
+
+    chunks = []
+    for image in images:
+        try:
+            chunks.append(pytesseract.image_to_string(
+                image, lang=lang, timeout=OCR_PAGE_TIMEOUT) or "")
+        except RuntimeError as exc:  # таймаут tesseract
+            log.warning(f"OCR страницы прерван по таймауту: {exc}")
+        except Exception as exc:
+            log.warning(f"OCR страницы не удался: {exc}")
+        if sum(len(c) for c in chunks) > max_chars * 4:
+            break
+
+    text = _MANY_BLANKS_RE.sub("\n\n", "\n".join(chunks)).strip()
+    if len(re.sub(r"\s", "", text)) < 20:
+        return {"ok": False,
+                "reason": "скан распознан, но текста не нашлось — "
+                          "возможно, пустая или нечитаемая страница",
+                "images": len(images)}
+
+    text, truncated = truncate(text, max_chars)
+    return {"ok": True, "text": text, "truncated": truncated,
+            "source": "ocr", "ocr_pages": len(images), "ocr_lang": lang}
 
 
 _DOCX_PARA_RE = re.compile(rb"<w:p[ >].*?</w:p>", re.DOTALL)
@@ -415,12 +515,14 @@ def extract_docx_text(data: bytes, max_chars: int = 5000) -> dict:
 
 
 def extract_attachment_text(filename: str, content_type: str, data: bytes,
-                            max_chars: int = 5000) -> dict:
+                            max_chars: int = 5000, ocr: str = "auto",
+                            ocr_max_pages: int = OCR_MAX_PAGES) -> dict:
     """Текст из вложения по типу файла. Поддержаны PDF и DOCX."""
     name = (filename or "").lower()
     ctype = (content_type or "").lower()
     if name.endswith(".pdf") or "pdf" in ctype:
-        return extract_pdf_text(data, max_chars)
+        return extract_pdf_text(data, max_chars, ocr=ocr,
+                                ocr_max_pages=ocr_max_pages)
     if name.endswith(".docx") or "wordprocessingml" in ctype:
         return extract_docx_text(data, max_chars)
     if name.endswith(".txt") or ctype.startswith("text/"):

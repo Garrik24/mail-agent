@@ -10,3 +10,7 @@ jinja2>=3
 # Текст из PDF-вложений (get_attachment_text). Чистый Python, без системных
 # библиотек — на сборку образа Railway не влияет.
 pypdf>=5
+# Распознавание сканов: Pillow достаёт картинки страниц из PDF, pytesseract
+# зовёт системный tesseract (см. tesseract-ocr в nixpacks.toml / Dockerfile).
+pillow>=10
+pytesseract>=0.3.10

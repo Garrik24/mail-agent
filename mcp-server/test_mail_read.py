@@ -292,6 +292,74 @@ class TestAttachmentText(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("скан", result["reason"])
 
+    def _scan_pdf(self, text: str = "Направляем согласование трассы") -> bytes:
+        """PDF-«скан»: страница-картинка с текстом, без текстового слоя."""
+        from PIL import Image, ImageDraw
+        from pypdf import PdfWriter
+
+        image = Image.new("RGB", (1240, 400), "white")
+        draw = ImageDraw.Draw(image)
+        # Крупный дефолтный шрифт: мелкий bitmap-шрифт tesseract не берёт
+        draw.text((40, 150), text, fill="black", font_size=48)
+        buf = io.BytesIO()
+        image.save(buf, format="PDF")
+
+        # Сверяем, что текстового слоя в получившемся PDF действительно нет
+        writer = PdfWriter(clone_from=io.BytesIO(buf.getvalue()))
+        out = io.BytesIO()
+        writer.write(out)
+        return out.getvalue()
+
+    def test_scan_pdf_has_no_text_layer(self):
+        """Без OCR скан честно помечается, а не отдаёт мусор."""
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow не установлен")
+        result = mail_read.extract_pdf_text(self._scan_pdf(), ocr="off")
+        self.assertFalse(result["ok"])
+        self.assertIn("скан", result["reason"])
+
+    def test_ocr_reads_russian_scan(self):
+        available, reason = mail_read.ocr_available()
+        if not available:
+            self.skipTest(f"OCR недоступен локально: {reason}")
+        result = mail_read.extract_pdf_text(
+            self._scan_pdf("Направляем согласование трассы"), ocr="auto")
+        self.assertTrue(result["ok"], result.get("reason"))
+        self.assertEqual(result["source"], "ocr")
+        self.assertIn("огласовани", result["text"])
+
+    def test_ocr_unavailable_gives_reason_not_crash(self):
+        """Без tesseract инструмент возвращает причину, а не падает."""
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow не установлен")
+        result = mail_read.extract_pdf_text(self._scan_pdf(), ocr="auto")
+        self.assertIn("ok", result)
+        if not result["ok"]:
+            self.assertIn("reason", result)
+            self.assertIsInstance(result["reason"], str)
+
+    def test_page_images_extracted_from_scan(self):
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow не установлен")
+        images = mail_read.pdf_page_images(self._scan_pdf())
+        self.assertGreaterEqual(len(images), 1)
+
+    def test_ocr_off_is_respected_for_attachments(self):
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow не установлен")
+        result = mail_read.extract_attachment_text(
+            "скан.pdf", "application/pdf", self._scan_pdf(), ocr="off")
+        self.assertFalse(result["ok"])
+        self.assertIn("скан", result["reason"])
+
     def test_broken_pdf_gives_reason_not_exception(self):
         result = mail_read.extract_pdf_text(b"definitely not a pdf")
         self.assertFalse(result["ok"])
