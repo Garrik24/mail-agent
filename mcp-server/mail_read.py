@@ -437,6 +437,30 @@ def pdf_page_images(data: bytes, max_pages: int = OCR_MAX_PAGES) -> list:
     return images
 
 
+# Картинки мельче этого — логотипы и подписи в бланке, не страница скана
+OCR_MIN_SIDE = 300
+# Ниже этой ширины tesseract начинает ошибаться: скан апскейлим
+OCR_TARGET_WIDTH = 1600
+
+
+def prepare_for_ocr(image):
+    """Приводит картинку к виду, на котором tesseract работает уверенно.
+
+    Одноцветные (1-bit) сканы и мелкие картинки распознаются плохо, поэтому
+    переводим в градации серого и растягиваем до разумной ширины.
+    """
+    from PIL import Image
+
+    if image.mode not in ("L", "RGB"):
+        image = image.convert("L")
+    width, height = image.size
+    if width < OCR_TARGET_WIDTH:
+        scale = min(3.0, OCR_TARGET_WIDTH / max(width, 1))
+        image = image.resize((int(width * scale), int(height * scale)),
+                             Image.LANCZOS)
+    return image
+
+
 def ocr_pdf(data: bytes, max_chars: int = 5000,
             max_pages: int = OCR_MAX_PAGES, lang: str = OCR_LANG) -> dict:
     """Распознаёт текст со сканированного PDF (tesseract, rus+eng)."""
@@ -459,11 +483,17 @@ def ocr_pdf(data: bytes, max_chars: int = 5000,
                           "возможно, PDF в формате, который не разбирается "
                           "(например JBIG2 без jbig2dec)"}
 
+    # Крупные картинки — это страницы скана; мелочь (логотип, подпись в
+    # бланке) только тратит время. Если крупных нет — распознаём всё подряд.
+    big = [i for i in images if min(i.size) >= OCR_MIN_SIDE]
+    targets = big or images
+
     chunks = []
-    for image in images:
+    for image in targets:
         try:
             chunks.append(pytesseract.image_to_string(
-                image, lang=lang, timeout=OCR_PAGE_TIMEOUT) or "")
+                prepare_for_ocr(image), lang=lang,
+                timeout=OCR_PAGE_TIMEOUT) or "")
         except RuntimeError as exc:  # таймаут tesseract
             log.warning(f"OCR страницы прерван по таймауту: {exc}")
         except Exception as exc:
@@ -476,7 +506,11 @@ def ocr_pdf(data: bytes, max_chars: int = 5000,
         return {"ok": False,
                 "reason": "скан распознан, но текста не нашлось — "
                           "возможно, пустая или нечитаемая страница",
-                "images": len(images)}
+                "images": len(images),
+                # Диагностика: по размерам и режиму видно, дошла ли до OCR
+                # сама страница или только мелкие элементы бланка
+                "images_info": [f"{i.size[0]}x{i.size[1]} {i.mode}"
+                                for i in images[:8]]}
 
     text, truncated = truncate(text, max_chars)
     return {"ok": True, "text": text, "truncated": truncated,
