@@ -65,7 +65,7 @@ class TestScoring(unittest.TestCase):
 
     def test_subject_patterns(self):
         cases = [
-            ("О согласовании топографической съёмки", "тема о согласовании"),
+            ("О согласовании топографической съёмки", "в теме согласование"),
             ("О рассмотрении обращения", "тема о рассмотрении"),
             ("О предоставлении информации", "тема о предоставлении"),
             ("Ответ на исх. № 1005", "в теме исходящий номер"),
@@ -99,7 +99,7 @@ class TestScoring(unittest.TestCase):
         msg = make(subject=subject, attachments=["Ответ.pdf"], reply=True)
         result = mail_triage.score_message(msg, "1")
         self.assertEqual(result["subject"], "О согласовании топосъёмки")
-        self.assertIn("тема о согласовании", result["reasons"])
+        self.assertIn("в теме согласование", result["reasons"])
 
     def test_min_score_threshold_is_respected(self):
         """Порог решает, что считать кандидатом."""
@@ -181,6 +181,58 @@ class TestMetadataScoring(unittest.TestCase):
         item = mail_triage.score_meta(meta)
         self.assertNotIn("тело пустое или в одну строку — суть во вложении",
                          item["reasons"])
+
+
+class TestRecallFeatures(unittest.TestCase):
+    """Признаки, добавленные после проверки на папке СОГЛАСОВАНИЯ."""
+
+    def test_subject_without_preposition(self):
+        """«Согласование топосъемки» без предлога «о» — тоже согласование."""
+        for subject in ("Согласование топосъемки", "согласования по объекту",
+                        "Re: Согласование топосъемки по санаторию"):
+            with self.subTest(subject=subject):
+                result = mail_triage.score_message(make(subject=subject), "1")
+                self.assertIn("в теме согласование", result["reasons"])
+
+    def test_subject_topo_words(self):
+        result = mail_triage.score_message(
+            make(subject="Топографическая съёмка участка"), "1")
+        self.assertIn("в теме топосъёмка или топоплан", result["reasons"])
+
+    def test_document_name_counts_as_signal(self):
+        """У писем без темы вся подсказка — в имени файла."""
+        result = mail_triage.score_message(
+            make(subject="", body="",
+                 attachments=["Согласовано_топосъемка_Факел.pdf"]), "1")
+        joined = " ".join(result["reasons"])
+        self.assertIn("в имени файла согласование или топосъёмка", joined)
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_organization_on_free_mail_is_not_a_robot(self):
+        """Организация с Яндекс-почты не должна получать штраф как робот."""
+        result = mail_triage.score_message(
+            make(subject="Согласование топосъемки",
+                 sender="КСК АО <kskkmv.pto@yandex.ru>", body="",
+                 attachments=["Согласование топосъемки.pdf"]), "1")
+        joined = " ".join(result["reasons"])
+        self.assertNotIn("рассылку или робота", joined)
+        self.assertIn("бесплатная почта", joined)
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_robot_still_penalised_hard(self):
+        result = mail_triage.score_message(
+            make(subject="Согласование заказа",
+                 sender="Робот <no-reply@telko.ru>",
+                 body="текст " * 100, attachments=["catalog.pdf"]), "1")
+        self.assertIn("похоже на рассылку или робота", result["reasons"])
+        self.assertLess(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_free_mail_personal_chat_still_low(self):
+        """Смягчение штрафа не должно тащить наверх личную переписку."""
+        result = mail_triage.score_message(
+            make(subject="привет, как дела", sender="Друг <friend@gmail.com>",
+                 body="созвонимся завтра"), "1")
+        self.assertLess(result["score"], mail_triage.DEFAULT_MIN_SCORE)
 
 
 if __name__ == "__main__":

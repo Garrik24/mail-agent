@@ -32,32 +32,46 @@ log = logging.getLogger(__name__)
 # Скоринг идёт по метаданным, поэтому потолок высокий: столько писем
 # сервер отдаёт пачками за разумное время
 DEFAULT_MAX_SCAN = 5000
-# Порог 3 ловит вообще всю деловую переписку с вложениями (договоры, УПД,
-# тендеры): на живом ящике это 67 писем из 200. При 5 остаётся короткий
-# проверяемый список — те самые ответы организаций.
-DEFAULT_MIN_SCORE = 5
+# Порог выбран по эталону: в папке СОГЛАСОВАНИЯ 23 разобранных вручную
+# письма, и на них видно, сколько настоящих согласований теряется. Порог 3
+# захватывает заодно всю деловую переписку с вложениями, порог 5 при старом
+# наборе признаков пропускал больше половины эталона.
+DEFAULT_MIN_SCORE = 4
 SHORT_BODY = 200
 
-# Темы ответов на наши исходящие. Слова «согласование» тут может и не быть.
+# Темы ответов на наши исходящие. Требовать предлог «о» нельзя: половина
+# писем в папке СОГЛАСОВАНИЯ называется просто «Согласование топосъемки».
 _SUBJECT_PATTERNS = (
+    (re.compile(r"согласован", re.IGNORECASE), "в теме согласование"),
+    (re.compile(r"(топосъ[её]м|топограф|топоплан|топо-?план)", re.IGNORECASE),
+     "в теме топосъёмка или топоплан"),
     (re.compile(r"в\s+ответ\s+на", re.IGNORECASE), "тема «в ответ на»"),
     (re.compile(r"на\s+(ваш|ваше|ваш[еи]\s+письмо|№)", re.IGNORECASE),
      "тема «на ваше письмо»"),
     (re.compile(r"\bисх\.?\s*(№|N|#)?\s*\d+", re.IGNORECASE),
      "в теме исходящий номер"),
-    (re.compile(r"о\s+согласовани", re.IGNORECASE), "тема о согласовании"),
     (re.compile(r"о\s+рассмотрении", re.IGNORECASE), "тема о рассмотрении"),
     (re.compile(r"о\s+предоставлении", re.IGNORECASE), "тема о предоставлении"),
     (re.compile(r"(технически[ех]|ТУ)\s+услови", re.IGNORECASE),
      "тема о технических условиях"),
 )
 
-# Почта, с которой согласования не приходят: рассылки, роботы, площадки
-_MASS_SENDER_RE = re.compile(
-    r"(no-?reply|noreply|notification|mailer|robot|info@|news|digest|"
-    r"support@|billing|rassylka|sabylink|saby|avito|hh\.ru|telko|"
-    r"yandex\.ru|gmail\.com|mail\.ru|bk\.ru|list\.ru|inbox\.ru)",
-    re.IGNORECASE)
+# Те же слова в имени приложенного файла: «Согласовано_топосъемка_Факел.pdf»
+# — сигнал не слабее темы, а темы у таких писем часто нет вовсе.
+_DOC_NAME_RE = re.compile(
+    r"(согласован|топосъ[её]м|топограф|топоплан)", re.IGNORECASE)
+
+# Роботы и площадки: согласования оттуда не приходят никогда
+_ROBOT_RE = re.compile(
+    r"(no-?reply|noreply|notification|mailer|robot|digest|billing|"
+    r"rassylka|sabylink|saby|avito|hh\.ru|telko)", re.IGNORECASE)
+
+# Бесплатная почта — это НЕ признак робота: в регионах организации сплошь
+# сидят на Яндексе и Mail.ru. Штраф мягкий, только чтобы личная переписка
+# не всплывала выше писем с корпоративных доменов.
+_FREE_MAIL_RE = re.compile(
+    r"@(yandex\.(ru|com)|ya\.ru|gmail\.com|mail\.ru|bk\.ru|list\.ru|"
+    r"inbox\.ru|rambler\.ru|outlook\.com|hotmail\.com)$", re.IGNORECASE)
 
 # Организации, от которых приходят согласования, обычно на своём домене
 _ORG_HINT_RE = re.compile(
@@ -105,10 +119,17 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
         if body_is_short:
             score += 2
             reasons.append("тело пустое или в одну строку — суть во вложении")
+        matched = next((n for n in doc_names if _DOC_NAME_RE.search(n)), None)
+        if matched:
+            score += 2
+            reasons.append(f"в имени файла согласование или топосъёмка: {matched}")
 
-    if _MASS_SENDER_RE.search(sender_email):
+    if _ROBOT_RE.search(sender_email):
         score -= 3
         reasons.append("похоже на рассылку или робота")
+    elif _FREE_MAIL_RE.search(sender_email):
+        score -= 1
+        reasons.append(f"бесплатная почта, а не домен организации: {domain}")
     elif domain:
         score += 1
         reasons.append(f"письмо с домена организации: {domain}")
