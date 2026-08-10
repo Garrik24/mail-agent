@@ -398,6 +398,8 @@ def extract_pdf_text(data: bytes, max_chars: int = 5000, ocr: str = "auto",
 # страниц ограничено: инструмент должен отвечать, а не молчать минуту.
 OCR_LANG = "rus+eng"
 OCR_PAGE_TIMEOUT = 40
+# Повороты пробуются только при пустом результате, поэтому лимит жёстче
+OCR_ROTATED_TIMEOUT = 25
 OCR_MAX_PAGES = 5
 
 
@@ -446,11 +448,14 @@ OCR_TARGET_WIDTH = 1600
 def prepare_for_ocr(image):
     """Приводит картинку к виду, на котором tesseract работает уверенно.
 
-    Одноцветные (1-bit) сканы и мелкие картинки распознаются плохо, поэтому
-    переводим в градации серого и растягиваем до разумной ширины.
+    Одноцветные (1-bit) и палитровые сканы распознаются плохо, поэтому
+    переводим в градации серого (палитру — через RGB, иначе теряются
+    полутона) и растягиваем мелкие картинки до разумной ширины.
     """
     from PIL import Image
 
+    if image.mode == "P":
+        image = image.convert("RGB")
     if image.mode not in ("L", "RGB"):
         image = image.convert("L")
     width, height = image.size
@@ -459,6 +464,44 @@ def prepare_for_ocr(image):
         image = image.resize((int(width * scale), int(height * scale)),
                              Image.LANCZOS)
     return image
+
+
+def _has_text(value: str) -> bool:
+    return len(re.sub(r"\s", "", value or "")) >= 20
+
+
+def _ocr_image(pytesseract, image, lang: str) -> str:
+    """Распознаёт одну страницу, при пустом результате пробуя повороты.
+
+    Документы часто сканируют боком: страница приходит landscape, и при
+    обычном режиме tesseract не находит на ней ни строчки. Повороты стоят
+    времени, поэтому пробуются только когда прямой проход дал пустоту.
+    """
+    prepared = prepare_for_ocr(image)
+    try:
+        text = pytesseract.image_to_string(
+            prepared, lang=lang, timeout=OCR_PAGE_TIMEOUT) or ""
+    except RuntimeError as exc:  # таймаут tesseract
+        log.warning(f"OCR страницы прерван по таймауту: {exc}")
+        return ""
+    except Exception as exc:
+        log.warning(f"OCR страницы не удался: {exc}")
+        return ""
+    if _has_text(text):
+        return text
+
+    for angle in (270, 90, 180):
+        try:
+            rotated = prepared.rotate(angle, expand=True)
+            candidate = pytesseract.image_to_string(
+                rotated, lang=lang, timeout=OCR_ROTATED_TIMEOUT) or ""
+        except Exception as exc:
+            log.warning(f"OCR повёрнутой на {angle}° страницы не удался: {exc}")
+            continue
+        if _has_text(candidate):
+            log.info(f"Страница распознана после поворота на {angle}°")
+            return candidate
+    return text
 
 
 def ocr_pdf(data: bytes, max_chars: int = 5000,
@@ -490,14 +533,7 @@ def ocr_pdf(data: bytes, max_chars: int = 5000,
 
     chunks = []
     for image in targets:
-        try:
-            chunks.append(pytesseract.image_to_string(
-                prepare_for_ocr(image), lang=lang,
-                timeout=OCR_PAGE_TIMEOUT) or "")
-        except RuntimeError as exc:  # таймаут tesseract
-            log.warning(f"OCR страницы прерван по таймауту: {exc}")
-        except Exception as exc:
-            log.warning(f"OCR страницы не удался: {exc}")
+        chunks.append(_ocr_image(pytesseract, image, lang))
         if sum(len(c) for c in chunks) > max_chars * 4:
             break
 
