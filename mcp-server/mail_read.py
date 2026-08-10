@@ -1,0 +1,435 @@
+"""Разбор писем: тело текстом, вложения, флаги, цитаты.
+
+Чистые функции без сети — всё, что принимает уже загруженное письмо.
+Используется исправленными инструментами чтения (imap_client) и новыми
+read_messages / get_attachment_text (mail_read_tools).
+
+Кодировки: уважается charset каждой части (windows-1251 в русской деловой
+переписке встречается регулярно), base64 и quoted-printable разбирает
+email.message.get_payload(decode=True).
+"""
+
+import email.message
+import html as html_module
+import io
+import logging
+import re
+import zipfile
+from email.header import decode_header, make_header
+
+log = logging.getLogger(__name__)
+
+__all__ = ["decode_mime_header", "html_to_text", "split_quotes", "truncate",
+           "extract_body", "list_attachments", "parse_flags_list", "part_filename",
+           "build_message_dict", "find_attachment", "extract_pdf_text",
+           "extract_docx_text", "extract_attachment_text"]
+
+# Куски письма, после которых начинается процитированная переписка
+_QUOTE_MARKERS = (
+    re.compile(r"^-{2,}\s*(original message|исходное сообщение|"
+               r"пересланное сообщение|forwarded message)\s*-{2,}\s*$",
+               re.IGNORECASE),
+    re.compile(r"^\s*(от кого|кому|from|sent|отправлено)\s*:\s*.+$",
+               re.IGNORECASE),
+    re.compile(r"^\s*от\s*:\s*.*[<(].*@.*[>)].*$", re.IGNORECASE),
+    re.compile(r"^\s*\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4}.*(написал|wrote)\s*:?\s*$",
+               re.IGNORECASE),
+    re.compile(r"^\s*on\s+.+\s+wrote\s*:\s*$", re.IGNORECASE),
+    re.compile(r"^_{20,}\s*$"),
+)
+
+_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_BREAK_RE = re.compile(
+    r"<\s*(br|/p|/div|/tr|/li|/h[1-6]|/table)\b[^>]*>", re.IGNORECASE)
+_BLOCK_START_RE = re.compile(r"<\s*(p|div|tr|li|h[1-6])\b[^>]*>", re.IGNORECASE)
+_TAG_RE = re.compile(r"<[^>]+>")
+_MANY_BLANKS_RE = re.compile(r"\n{3,}")
+
+
+def _repair_surrogates(value: str) -> str:
+    """Чинит заголовки с сырым UTF-8 вместо encoded-words.
+
+    Такие письма встречаются: почтовик кладёт в Subject неASCII-байты как
+    есть, email-парсер отдаёт их через surrogateescape (\\udcd0...). Без
+    восстановления тема превращается в кашу из вопросительных знаков.
+    """
+    if not any("\udc80" <= ch <= "\udcff" for ch in value):
+        return value
+    raw = value.encode("utf-8", errors="surrogateescape")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1251", errors="replace")
+
+
+def _decode_chunk(data: bytes, charset: str | None) -> str:
+    """Декодирует кусок заголовка, не доверяя объявленной кодировке вслепую."""
+    if charset and charset.lower() not in ("unknown-8bit", "x-unknown", "unknown"):
+        try:
+            return data.decode(charset, errors="replace")
+        except LookupError:
+            log.warning(f"Неизвестная кодировка заголовка: {charset}")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("cp1251", errors="replace")
+
+
+def decode_mime_header(value) -> str:
+    """MIME encoded-words (=?UTF-8?B?...?=) -> обычная строка.
+
+    Части собираются вручную: make_header на charset «unknown-8bit» (а его
+    ставит парсер, когда в заголовке лежат сырые не-ASCII байты) портит
+    русский текст в набор вопросительных знаков.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    try:
+        parts = decode_header(value)
+    except Exception:
+        return _repair_surrogates(str(value)).strip()
+
+    out = []
+    for chunk, charset in parts:
+        if isinstance(chunk, bytes):
+            out.append(_decode_chunk(chunk, charset))
+        else:
+            out.append(chunk)
+    return _repair_surrogates("".join(out)).strip()
+
+
+def html_to_text(raw_html: str) -> str:
+    """HTML -> читаемый текст: теги вырезаны, переводы строк сохранены."""
+    if not raw_html:
+        return ""
+    text = _SCRIPT_STYLE_RE.sub(" ", raw_html)
+    text = _BREAK_RE.sub("\n", text)
+    text = _BLOCK_START_RE.sub("\n", text)
+    text = _TAG_RE.sub("", text)
+    text = html_module.unescape(text)
+    text = text.replace("\xa0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    return _MANY_BLANKS_RE.sub("\n\n", "\n".join(lines)).strip()
+
+
+def split_quotes(text: str) -> tuple[str, str]:
+    """Делит тело на собственный текст и процитированную переписку.
+
+    Цитатой считается всё после маркера ответа («-----Original Message-----»,
+    «От кого:», «12.05.2026 ... написал:», длинная линия подчёркиваний), а
+    также отдельные строки, начинающиеся с '>'.
+    """
+    if not text:
+        return "", ""
+    lines = text.split("\n")
+    cut = len(lines)
+    for i, line in enumerate(lines):
+        if any(marker.match(line) for marker in _QUOTE_MARKERS):
+            cut = i
+            break
+    own_lines = lines[:cut]
+    quoted_lines = lines[cut:]
+
+    kept = [ln for ln in own_lines if not ln.lstrip().startswith(">")]
+    dropped = [ln for ln in own_lines if ln.lstrip().startswith(">")]
+
+    own = _MANY_BLANKS_RE.sub("\n\n", "\n".join(kept)).strip()
+    quoted = "\n".join(dropped + quoted_lines).strip()
+    return own, quoted
+
+
+def truncate(text: str, max_chars: int) -> tuple[str, bool]:
+    """Обрезает текст до max_chars. Возвращает (текст, был ли обрезан)."""
+    if not text or max_chars is None or max_chars <= 0 or len(text) <= max_chars:
+        return text or "", False
+    return text[:max_chars].rstrip(), True
+
+
+def _decode_part(part: email.message.Message) -> str:
+    """Достаёт текст части с учётом charset, base64 и quoted-printable."""
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        raw = part.get_payload()
+        return raw if isinstance(raw, str) else ""
+
+    charset = part.get_content_charset()
+    if charset:
+        try:
+            return payload.decode(charset, errors="replace")
+        except (LookupError, UnicodeDecodeError):
+            log.warning(f"Неизвестная кодировка части: {charset}")
+    # charset не объявлен или неизвестен: utf-8, затем cp1251
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return payload.decode("cp1251", errors="replace")
+
+
+_FILENAME_PARAM_RE = re.compile(
+    r"""(?:file)?name\s*=\s*(?:"([^"]+)"|'([^']+)'|([^;\s]+))""", re.IGNORECASE)
+
+
+def part_filename(part: email.message.Message) -> str:
+    """Имя вложения: encoded-words, RFC 2231 и сырые не-ASCII байты.
+
+    get_filename() портит имя, когда почтовик положил в параметр сырой UTF-8
+    (парсер помечает такой заголовок как unknown-8bit). В этом случае имя
+    достаётся из самого заголовка Content-Disposition / Content-Type.
+    """
+    name = decode_mime_header(part.get_filename() or "")
+    if name and "�" not in name:
+        return name
+
+    for header in ("Content-Disposition", "Content-Type"):
+        raw = part.get(header)
+        if raw is None:
+            continue
+        decoded = decode_mime_header(raw)
+        if "�" in decoded:
+            continue
+        match = _FILENAME_PARAM_RE.search(decoded)
+        if match:
+            candidate = next(g for g in match.groups() if g)
+            if candidate.strip():
+                return candidate.strip()
+    return name
+
+
+def _is_attachment(part: email.message.Message) -> bool:
+    disposition = str(part.get("Content-Disposition", "")).lower()
+    if "attachment" in disposition:
+        return True
+    return bool(part.get_filename())
+
+
+def extract_body(msg: email.message.Message) -> dict:
+    """Тело письма текстом: text/plain приоритетнее, иначе HTML -> текст.
+
+    Возвращает {"text": ..., "format": "plain"|"html"|""}.
+    """
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+
+    if not msg.is_multipart():
+        text = _decode_part(msg)
+        if msg.get_content_type() == "text/html":
+            return {"text": html_to_text(text), "format": "html"}
+        return {"text": (text or "").strip(), "format": "plain" if text else ""}
+
+    for part in msg.walk():
+        if part.is_multipart() or _is_attachment(part):
+            continue
+        ctype = part.get_content_type()
+        if ctype == "text/plain":
+            plain_parts.append(_decode_part(part))
+        elif ctype == "text/html":
+            html_parts.append(_decode_part(part))
+
+    if any(p.strip() for p in plain_parts):
+        return {"text": "\n".join(plain_parts).strip(), "format": "plain"}
+    if html_parts:
+        return {"text": html_to_text("\n".join(html_parts)), "format": "html"}
+    return {"text": "", "format": ""}
+
+
+def list_attachments(msg: email.message.Message) -> list[dict]:
+    """Вложения: имя, MIME-тип, размер в байтах. Содержимое не отдаётся."""
+    attachments: list[dict] = []
+    if not msg.is_multipart():
+        return attachments
+    for part in msg.walk():
+        if part.is_multipart() or not _is_attachment(part):
+            continue
+        filename = part_filename(part)
+        if not filename:
+            continue
+        payload = part.get_payload(decode=True)
+        attachments.append({
+            "filename": filename,
+            "content_type": part.get_content_type(),
+            "size_bytes": len(payload) if payload else 0,
+        })
+    return attachments
+
+
+def parse_flags_list(raw_flags) -> list[str]:
+    """FLAGS из ответа IMAP -> список строк."""
+    if isinstance(raw_flags, (bytes, bytearray)):
+        raw_flags = bytes(raw_flags).decode("utf-8", errors="replace")
+    if not raw_flags:
+        return []
+    match = re.search(r"FLAGS\s+\(([^)]*)\)", raw_flags, re.IGNORECASE)
+    if match:
+        raw_flags = match.group(1)
+    return [f for f in raw_flags.split() if f]
+
+
+def build_message_dict(msg: email.message.Message, uid: str = "",
+                       flags: list[str] | None = None,
+                       max_chars: int = 5000,
+                       strip_quotes: bool = True) -> dict:
+    """Собирает письмо в словарь: заголовки, тело текстом, вложения, флаги."""
+    from email.utils import parseaddr
+
+    flags = flags or []
+    body = extract_body(msg)
+    text = body["text"]
+    quoted = ""
+    if strip_quotes:
+        text, quoted = split_quotes(text)
+    text, truncated = truncate(text, max_chars)
+
+    from_raw = decode_mime_header(msg.get("From", ""))
+    sender_name, sender_email = parseaddr(from_raw)
+
+    result = {
+        "uid": uid,
+        "message_id": (msg.get("Message-ID", "") or "").strip(),
+        "date": msg.get("Date", ""),
+        "subject": decode_mime_header(msg.get("Subject", "")),
+        "sender_name": sender_name or sender_email,
+        "sender_email": sender_email,
+        "from": from_raw,
+        "to": decode_mime_header(msg.get("To", "")),
+        "cc": decode_mime_header(msg.get("Cc", "")),
+        "reply_to": decode_mime_header(msg.get("Reply-To", "")),
+        "body": text,
+        "body_format": body["format"],
+        "truncated": truncated,
+        "attachments": list_attachments(msg),
+        "flags": flags,
+        "flagged": "\\Flagged" in flags,
+        "seen": "\\Seen" in flags,
+        "answered": "\\Answered" in flags,
+    }
+    if strip_quotes and quoted:
+        result["quoted_text"] = quoted[:2000]
+    return result
+
+
+# ------------------------------------------------------- текст из вложений
+
+def find_attachment(msg: email.message.Message, name: str = "") -> dict | None:
+    """Ищет вложение по имени (без учёта регистра, допускает подстроку).
+
+    Без имени возвращает первое вложение, из которого умеем доставать текст
+    (PDF или DOCX), иначе просто первое.
+    """
+    candidates = []
+    for part in msg.walk():
+        if part.is_multipart() or not _is_attachment(part):
+            continue
+        filename = part_filename(part)
+        if not filename:
+            continue
+        payload = part.get_payload(decode=True)
+        candidates.append({
+            "filename": filename,
+            "content_type": part.get_content_type(),
+            "data": payload or b"",
+        })
+    if not candidates:
+        return None
+
+    if name:
+        target = name.strip().casefold()
+        for item in candidates:
+            if item["filename"].casefold() == target:
+                return item
+        for item in candidates:
+            if target in item["filename"].casefold():
+                return item
+        return None
+
+    for item in candidates:
+        if item["filename"].lower().endswith((".pdf", ".docx")):
+            return item
+    return candidates[0]
+
+
+def extract_pdf_text(data: bytes, max_chars: int = 5000) -> dict:
+    """Текст из PDF через pypdf. Скан без текстового слоя честно помечается."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        return {"ok": False, "reason": f"pypdf не установлен: {exc}"}
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        if getattr(reader, "is_encrypted", False):
+            try:
+                reader.decrypt("")
+            except Exception:
+                return {"ok": False, "reason": "PDF зашифрован паролем"}
+        pages = []
+        for page in reader.pages:
+            pages.append(page.extract_text() or "")
+            if sum(len(p) for p in pages) > max_chars * 4:
+                break
+        text = "\n".join(pages).strip()
+        page_count = len(reader.pages)
+    except Exception as exc:
+        return {"ok": False, "reason": f"не удалось прочитать PDF: {exc}"}
+
+    if len(re.sub(r"\s", "", text)) < 20:
+        return {"ok": False, "reason": "нет текстового слоя, вероятно скан",
+                "pages": page_count}
+
+    text, truncated = truncate(_MANY_BLANKS_RE.sub("\n\n", text), max_chars)
+    return {"ok": True, "text": text, "truncated": truncated,
+            "pages": page_count}
+
+
+_DOCX_PARA_RE = re.compile(rb"<w:p[ >].*?</w:p>", re.DOTALL)
+_DOCX_TEXT_RE = re.compile(rb"<w:t(?:\s[^>]*)?>(.*?)</w:t>", re.DOTALL)
+_DOCX_BREAK_RE = re.compile(rb"<w:(?:br|tab)\b[^>]*/?>")
+
+
+def extract_docx_text(data: bytes, max_chars: int = 5000) -> dict:
+    """Текст из DOCX без внешних зависимостей: zip + word/document.xml."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            xml = archive.read("word/document.xml")
+    except KeyError:
+        return {"ok": False, "reason": "в DOCX нет word/document.xml"}
+    except Exception as exc:
+        return {"ok": False, "reason": f"не удалось прочитать DOCX: {exc}"}
+
+    paragraphs = []
+    for para in _DOCX_PARA_RE.findall(xml):
+        para = _DOCX_BREAK_RE.sub(b" ", para)
+        chunks = [m.decode("utf-8", errors="replace")
+                  for m in _DOCX_TEXT_RE.findall(para)]
+        line = html_module.unescape("".join(chunks)).strip()
+        if line:
+            paragraphs.append(line)
+
+    text = "\n".join(paragraphs).strip()
+    if not text:
+        return {"ok": False, "reason": "в документе не найдено текста"}
+    text, truncated = truncate(text, max_chars)
+    return {"ok": True, "text": text, "truncated": truncated}
+
+
+def extract_attachment_text(filename: str, content_type: str, data: bytes,
+                            max_chars: int = 5000) -> dict:
+    """Текст из вложения по типу файла. Поддержаны PDF и DOCX."""
+    name = (filename or "").lower()
+    ctype = (content_type or "").lower()
+    if name.endswith(".pdf") or "pdf" in ctype:
+        return extract_pdf_text(data, max_chars)
+    if name.endswith(".docx") or "wordprocessingml" in ctype:
+        return extract_docx_text(data, max_chars)
+    if name.endswith(".txt") or ctype.startswith("text/"):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("cp1251", errors="replace")
+        text, truncated = truncate(text.strip(), max_chars)
+        return {"ok": True, "text": text, "truncated": truncated}
+    return {"ok": False,
+            "reason": f"формат не поддержан: {filename or content_type}. "
+                      "Умею PDF, DOCX и текстовые файлы"}

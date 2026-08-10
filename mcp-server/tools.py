@@ -121,7 +121,13 @@ def register_tools(mcp):
     def search_emails(query: str = "", sender: str = "",
                       date_from: str = "", date_to: str = "",
                       folder: str = "INBOX", limit: int = 50) -> str:
-        """Поиск писем по ключевым словам, отправителю или дате.
+        """Устаревший поиск писем. Предпочтительная замена — search_mail.
+
+        search_mail умеет искать по нескольким ключевым словам сразу, по
+        флагам и вложениям, отдаёт компактную выдачу и показывает режим
+        поиска. Этот инструмент оставлен для совместимости со старыми
+        сценариями и теперь тоже работает через UID SEARCH — возвращаемые
+        UID пригодны для get_email_body, read_messages и move_email.
 
         Args:
             query: Текст для поиска в теме и теле письма
@@ -152,16 +158,28 @@ def register_tools(mcp):
         return _run()
 
     @mcp.tool()
-    def get_email_body(email_uid: str, folder: str = "INBOX") -> str:
-        """Получить полное содержимое письма по его UID.
+    def get_email_body(email_uid: str, folder: str = "INBOX",
+                       max_chars: int = 5000,
+                       strip_quotes: bool = True) -> str:
+        """Получить содержимое письма по его UID.
+
+        Тело отдаётся текстом (HTML приводится к читаемому виду), вложения —
+        списком с именем, типом и размером. Просмотр НЕ помечает письмо
+        прочитанным.
 
         Args:
-            email_uid: UID письма (из результатов get_new_emails или search_emails)
-            folder: Папка почты (по умолчанию INBOX)
+            email_uid: UID письма (из search_mail, get_new_emails или
+                       get_important_emails), только цифры
+            folder: Папка почты, обычное имя, можно кириллицей
+            max_chars: Максимум символов тела; при обрезке в ответе truncated=true
+            strip_quotes: Убрать процитированную переписку в отдельное поле
         """
         @_with_imap
         def _run(client: IMAPClient):
-            result = client.get_email_body(email_uid=email_uid, folder=folder)
+            result = client.get_email_body(
+                email_uid=email_uid, folder=folder,
+                max_chars=max_chars, strip_quotes=strip_quotes,
+            )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
 
@@ -170,9 +188,12 @@ def register_tools(mcp):
         """Получить структурированные данные письма для анализа:
         отправитель, тема, тело, вложения, флаги.
 
+        Читает по UID и не помечает письмо прочитанным. Если тело пустое,
+        а вложения есть — содержание письма достанет get_attachment_text.
+
         Args:
-            email_uid: UID письма
-            folder: Папка почты (по умолчанию INBOX)
+            email_uid: UID письма (из search_mail), только цифры
+            folder: Папка почты, обычное имя, можно кириллицей
         """
         @_with_imap
         def _run(client: IMAPClient):
@@ -180,12 +201,16 @@ def register_tools(mcp):
             if "error" in data:
                 return json.dumps(data, ensure_ascii=False)
             analysis = {
+                "uid": data.get("uid", email_uid),
                 "sender": f"{data['sender_name']} <{data['sender_email']}>",
                 "subject": data["subject"],
                 "date": data["date"],
-                "body": data.get("body_full", "")[:5000],
+                "body": data.get("body", ""),
+                "body_truncated": data.get("truncated", False),
                 "attachments": data.get("attachments", []),
-                "flags": data.get("flags", ""),
+                "flags": data.get("flags", []),
+                "flagged": data.get("flagged", False),
+                "seen": data.get("seen", False),
                 "has_attachments": len(data.get("attachments", [])) > 0,
                 "instructions": (
                     "Проанализируй это письмо и определи: "
@@ -266,8 +291,11 @@ def register_tools(mcp):
         """Переслать письмо (с вложениями) на указанный email-адрес.
         Пересылает полное письмо: тело + все вложения (PDF, DOC и т.д.).
 
+        Оригинал читается строго по UID — идентификатор бери из search_mail
+        или search_mail-совместимой выдачи, иначе можно переслать не то письмо.
+
         Args:
-            email_uid: UID оригинального письма
+            email_uid: UID оригинального письма (только цифры)
             to: Email получателя (например, ashirovna2012@gmail.com)
             comment: Комментарий перед пересланным письмом (необязательно)
             folder: Папка с оригиналом (по умолчанию INBOX)

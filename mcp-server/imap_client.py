@@ -22,8 +22,13 @@ from email.mime.application import MIMEApplication
 from email.utils import parseaddr, formataddr, formatdate
 
 import attachment_storage
+import mail_read
+from imap_utf7 import quote_folder, resolve_folder
 
 log = logging.getLogger(__name__)
+
+UID_HINT = ("проверь, что UID получен из search_mail и указана верная папка "
+            "(список папок — list_folders)")
 
 IMAP_HOST = os.environ.get("MAIL_IMAP_HOST", "imap.mail.ru")
 IMAP_PORT = int(os.environ.get("MAIL_IMAP_PORT", "993"))
@@ -270,9 +275,14 @@ class IMAPClient:
             self.connect()
 
     def _select_folder(self, folder: str = "INBOX"):
-        """Выбрать папку. Для русских имён используем кавычки."""
+        """Выбрать папку по человекочитаемому имени, в том числе кириллицей.
+
+        Имя ищется в ответе LIST и кодируется в modified UTF-7 (resolve_folder),
+        поэтому «СОГЛАСОВАНИЯ» открывается по имени как есть.
+        """
         self._ensure_connected()
-        status, _ = self.conn.select(f'"{folder}"')
+        raw = resolve_folder(self.conn, folder)
+        status, _ = self.conn.select(quote_folder(raw))
         if status != "OK":
             raise RuntimeError(f"Не удалось открыть папку: {folder}")
 
@@ -302,8 +312,8 @@ class IMAPClient:
         self._select_folder(folder)
         since_date = (datetime.now(timezone.utc) - timedelta(hours=since_hours))
         date_str = since_date.strftime("%d-%b-%Y")
-        status, data = self.conn.search(None, f'(SINCE "{date_str}")')
-        if status != "OK" or not data[0]:
+        status, data = self.conn.uid("SEARCH", f'(SINCE "{date_str}")')
+        if status != "OK" or not data or not data[0]:
             return []
 
         uids = data[0].split()
@@ -315,8 +325,8 @@ class IMAPClient:
                              limit: int = 50) -> list[dict]:
         """Получить письма с флагом Important/Flagged."""
         self._select_folder(folder)
-        status, data = self.conn.search(None, "FLAGGED")
-        if status != "OK" or not data[0]:
+        status, data = self.conn.uid("SEARCH", "FLAGGED")
+        if status != "OK" or not data or not data[0]:
             return []
         uids = data[0].split()[-limit:]
         return self._fetch_emails(uids)
@@ -327,77 +337,108 @@ class IMAPClient:
                       sort_order: str = "desc") -> list[dict]:
         """Поиск писем по тексту, отправителю, дате.
 
+        Критерии собираются той же проверенной логикой, что и в search_mail:
+        плоский список токенов, ключевые слова как UTF-8 bytes, UID SEARCH.
+        Прежний вариант склеивал критерии в скобках и уходил через search()
+        по порядковым номерам — отсюда и падение на кириллице, и пустая
+        выдача по отправителю.
+
         sort_order: "asc" = старые первыми, "desc" = новые первыми (по умолчанию).
         """
-        self._select_folder(folder)
-        criteria = []
-        if query:
-            criteria.append(f'(OR SUBJECT "{query}" BODY "{query}")')
-        if sender:
-            criteria.append(f'(FROM "{sender}")')
-        if date_from:
-            try:
-                dt = datetime.strptime(date_from, "%Y-%m-%d")
-                criteria.append(f'(SINCE "{dt.strftime("%d-%b-%Y")}")')
-            except ValueError:
-                pass
-        if date_to:
-            try:
-                # IMAP BEFORE — строго раньше даты, +1 день для включения самой даты
-                dt = datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)
-                criteria.append(f'(BEFORE "{dt.strftime("%d-%b-%Y")}")')
-            except ValueError:
-                pass
-        if not criteria:
-            criteria.append("ALL")
+        from mail_tools_patch import _search_uids, build_criteria
 
-        search_str = " ".join(criteria) if len(criteria) > 1 else criteria[0]
-        status, data = self.conn.search(None, search_str)
-        if status != "OK" or not data[0]:
-            return []
-        uids = data[0].split()
+        self._select_folder(folder)
+        try:
+            criteria = build_criteria(
+                keywords=[query] if query else None, scope="both",
+                date_from=date_from, date_to=date_to, sender=sender,
+            )
+        except ValueError as exc:
+            log.warning(f"Некорректная дата в search_emails: {exc}")
+            criteria = build_criteria(
+                keywords=[query] if query else None, scope="both",
+                sender=sender,
+            )
+
+        uid_list, mode = _search_uids(self.conn, criteria)
+        log.info(f"search_emails: mode={mode}, найдено {len(uid_list)}")
+        uids = [u.encode() for u in uid_list]
         if sort_order == "asc":
             selected_uids = uids[:limit]
         else:
             selected_uids = uids[-limit:]
         return self._fetch_emails(selected_uids)
 
-    def get_email_body(self, email_uid: str,
-                       folder: str = "INBOX") -> dict:
-        """Получить полное содержимое письма по UID."""
+    def fetch_raw_message(self, email_uid: str,
+                          folder: str = "INBOX") -> tuple[bytes, list[str]]:
+        """Читает письмо целиком по UID, не трогая флаг «непрочитано».
+
+        BODY.PEEK[] вместо BODY[] — иначе просмотр письма проставляет \\Seen.
+        Возвращает (сырое письмо, флаги). Кидает ValueError с понятным текстом,
+        если UID некорректен или письма в папке нет.
+        """
+        uid = str(email_uid).strip()
+        if not uid.isdigit():
+            raise ValueError(
+                f"UID должен состоять только из цифр, получено: {email_uid!r}; "
+                f"{UID_HINT}"
+            )
         self._select_folder(folder)
-        status, data = self.conn.fetch(email_uid.encode(), "(RFC822 FLAGS)")
-        if status != "OK" or not data or not data[0]:
-            return {"error": f"Письмо {email_uid} не найдено"}
-        raw = data[0][1]
+        status, data = self.conn.uid("FETCH", uid, "(FLAGS BODY.PEEK[])")
+        chunk = data[0] if data else None
+        if status != "OK" or not isinstance(chunk, tuple) or len(chunk) < 2:
+            raise ValueError(
+                f"Письмо с UID {uid} не найдено в папке {folder}; {UID_HINT}"
+            )
+        prefix = chunk[0] if isinstance(chunk[0], bytes) else b""
+        return chunk[1], mail_read.parse_flags_list(prefix)
+
+    def get_email_body(self, email_uid: str, folder: str = "INBOX",
+                       max_chars: int = 5000,
+                       strip_quotes: bool = True) -> dict:
+        """Получить содержимое письма по UID. Флаг «непрочитано» не снимается.
+
+        Тело отдаётся текстом: text/plain, либо HTML, приведённый к тексту.
+        max_chars обрезает тело и выставляет truncated; strip_quotes выносит
+        процитированную переписку в отдельное поле.
+        """
+        try:
+            raw, flags = self.fetch_raw_message(email_uid, folder)
+        except ValueError as exc:
+            return {"error": str(exc)}
+
         msg = email.message_from_bytes(raw)
-        result = parse_email_message(msg, email_uid)
-        result["body_full"] = get_body(msg)
-        result["body_preview"] = result["body_full"][:500]
-        # Извлечь флаги
-        flags_data = data[0][0] if isinstance(data[0][0], bytes) else b""
-        result["flags"] = flags_data.decode("utf-8", errors="replace")
+        result = mail_read.build_message_dict(
+            msg, uid=str(email_uid).strip(), flags=flags,
+            max_chars=max_chars, strip_quotes=strip_quotes,
+        )
+        # Поля, на которые опираются get_reply_info, send_reply и analyze_email
+        result["to_list"] = parse_recipients(msg.get("To", ""))
+        result["cc_list"] = parse_recipients(msg.get("Cc", ""))
+        result["reply_to_email"] = parseaddr(msg.get("Reply-To", ""))[1] or ""
+        result["body_full"] = result["body"]
+        result["body_preview"] = result["body"][:500]
         return result
 
     def _fetch_emails(self, uids: list[bytes]) -> list[dict]:
-        """Загрузить письма по списку UID."""
+        """Загрузить заголовки писем по списку UID (не по номерам в папке)."""
         emails = []
         for uid in uids:
+            uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
             try:
-                uid_str = uid.decode() if isinstance(uid, bytes) else str(uid)
-                status, data = self.conn.fetch(uid, "(RFC822.HEADER FLAGS)")
-                if status != "OK" or not data or not data[0]:
+                status, data = self.conn.uid(
+                    "FETCH", uid_str, "(FLAGS BODY.PEEK[HEADER])")
+                chunk = data[0] if data else None
+                if status != "OK" or not isinstance(chunk, tuple) or len(chunk) < 2:
                     continue
-                raw_header = data[0][1]
-                msg = email.message_from_bytes(raw_header)
+                msg = email.message_from_bytes(chunk[1])
                 parsed = parse_email_message(msg, uid_str)
-                # Флаги
-                flags_data = data[0][0] if isinstance(data[0][0], bytes) else b""
-                parsed["flags"] = flags_data.decode("utf-8", errors="replace")
+                prefix = chunk[0] if isinstance(chunk[0], bytes) else b""
+                parsed["flags"] = mail_read.parse_flags_list(prefix)
                 parsed["body_preview"] = ""  # Только заголовки для списка
                 emails.append(parsed)
             except Exception as e:
-                log.error(f"Ошибка чтения письма {uid}: {e}")
+                log.error(f"Ошибка чтения письма UID {uid_str}: {e}")
         return emails
 
     def _find_sent_folder(self) -> str:
@@ -502,13 +543,14 @@ class IMAPClient:
             comment: Комментарий перед пересланным телом (необязательно)
             folder: Папка с оригиналом
         """
-        # 1. Забираем полное оригинальное письмо (RFC822)
-        self._select_folder(folder)
-        status, data = self.conn.fetch(email_uid.encode(), "(RFC822)")
-        if status != "OK" or not data or not data[0]:
-            return {"error": f"Письмо {email_uid} не найдено в папке {folder}"}
+        # 1. Забираем полное оригинальное письмо по UID.
+        # Именно UID: по порядковому номеру можно молча взять чужое письмо
+        # и переслать его постороннему адресату.
+        try:
+            raw, _ = self.fetch_raw_message(email_uid, folder)
+        except ValueError as exc:
+            return {"error": str(exc)}
 
-        raw = data[0][1]
         original = email.message_from_bytes(raw)
 
         # 2. Парсим заголовки
