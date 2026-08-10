@@ -110,5 +110,78 @@ class TestScoring(unittest.TestCase):
         self.assertGreaterEqual(low["score"], 1)
 
 
+class TestMetadataScoring(unittest.TestCase):
+    """Быстрый путь: скоринг по метаданным, без загрузки писем."""
+
+    HEADERS = (
+        b"Date: Mon, 08 Jun 2026 09:45:00 +0300\r\n"
+        b"From: =?utf-8?B?0J/QotCe?= <pto@kochubgaz.ru>\r\n"
+        b"Subject: =?utf-8?B?0J4g0YHQvtCz0LvQsNGB0L7QstCw0L3QuNC4?=\r\n"
+        b"In-Reply-To: <our-outgoing@mail.ru>\r\n"
+        b"Message-ID: <abc@kochubgaz.ru>\r\n\r\n"
+    )
+
+    PREFIX = (
+        b'12 (UID 177024 FLAGS (\\Seen) BODYSTRUCTURE '
+        b'(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "8BIT" 12 1)'
+        b'("APPLICATION" "PDF" ("NAME" "Otvet.pdf") NIL NIL "BASE64" 90000 '
+        b'NIL ("ATTACHMENT" ("FILENAME" "Otvet.pdf")) NIL) "MIXED") '
+        b'BODY[HEADER.FIELDS (DATE FROM SUBJECT)] {200}'
+    )
+
+    def test_text_part_size_from_bodystructure(self):
+        bs = (b'(("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "8BIT" 12 1)'
+              b'("APPLICATION" "PDF" NIL NIL NIL "BASE64" 90000 NIL NIL NIL))')
+        self.assertEqual(mail_triage.text_part_size(bs), 12)
+
+    def test_text_part_size_large_body(self):
+        bs = b'("TEXT" "PLAIN" ("CHARSET" "utf-8") NIL NIL "QUOTED-PRINTABLE" 4096 60)'
+        self.assertEqual(mail_triage.text_part_size(bs), 4096)
+
+    def test_text_part_size_absent(self):
+        self.assertIsNone(mail_triage.text_part_size(b'("IMAGE" "PNG" NIL)'))
+        self.assertIsNone(mail_triage.text_part_size(b""))
+
+    def test_parse_meta_item(self):
+        meta = mail_triage.parse_meta_item(self.PREFIX, self.HEADERS)
+        self.assertEqual(meta["uid"], "177024")
+        self.assertEqual(meta["subject"], "О согласовании")
+        self.assertIn("pto@kochubgaz.ru", meta["from"])
+        self.assertTrue(meta["has_reply_header"])
+        self.assertEqual(meta["attachments"], ["Otvet.pdf"])
+        self.assertEqual(meta["text_size"], 12)
+        self.assertEqual(meta["flags"], ["\\Seen"])
+
+    def test_score_meta_matches_full_scoring(self):
+        """Быстрый путь должен давать тот же балл, что и разбор письма."""
+        meta = mail_triage.parse_meta_item(self.PREFIX, self.HEADERS)
+        fast = mail_triage.score_meta(meta)
+
+        full_msg = make(subject="О согласовании",
+                        sender="ПТО <pto@kochubgaz.ru>", body="",
+                        attachments=["Otvet.pdf"], reply=True)
+        full = mail_triage.score_message(full_msg, "177024")
+        self.assertEqual(fast["score"], full["score"])
+        self.assertGreaterEqual(fast["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_unknown_body_size_does_not_add_points(self):
+        """Размер тела неизвестен — балл за «пустое тело» не выдаётся."""
+        with_size, _ = mail_triage.score_features(
+            "Информация", "x@kochubgaz.ru", False, ["a.pdf"], True)
+        unknown, reasons = mail_triage.score_features(
+            "Информация", "x@kochubgaz.ru", False, ["a.pdf"], None)
+        self.assertEqual(with_size - unknown, 2)
+        self.assertNotIn("тело пустое или в одну строку — суть во вложении",
+                         reasons)
+
+    def test_long_text_part_is_not_short_body(self):
+        prefix = self.PREFIX.replace(b'"8BIT" 12 1', b'"8BIT" 4000 80')
+        meta = mail_triage.parse_meta_item(prefix, self.HEADERS)
+        self.assertEqual(meta["text_size"], 4000)
+        item = mail_triage.score_meta(meta)
+        self.assertNotIn("тело пустое или в одну строку — суть во вложении",
+                         item["reasons"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
