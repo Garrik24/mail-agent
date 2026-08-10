@@ -37,6 +37,7 @@ DEFAULT_MAX_SCAN = 5000
 # захватывает заодно всю деловую переписку с вложениями, порог 5 при старом
 # наборе признаков пропускал больше половины эталона.
 DEFAULT_MIN_SCORE = 4
+# Тематический признак обязателен: см. score_features
 SHORT_BODY = 200
 
 # Темы ответов на наши исходящие. Требовать предлог «о» нельзя: половина
@@ -59,7 +60,8 @@ _SUBJECT_PATTERNS = (
 # Те же слова в имени приложенного файла: «Согласовано_топосъемка_Факел.pdf»
 # — сигнал не слабее темы, а темы у таких писем часто нет вовсе.
 _DOC_NAME_RE = re.compile(
-    r"(согласован|топосъ[её]м|топограф|топоплан)", re.IGNORECASE)
+    r"(согласован|топосъ[её]м|топограф|топоплан|исх[._\s-]*(№|n)?\s*\d)",
+    re.IGNORECASE)
 
 # Роботы и площадки: согласования оттуда не приходят никогда
 _ROBOT_RE = re.compile(
@@ -84,8 +86,16 @@ DOC_EXTENSIONS = (".pdf", ".docx", ".doc", ".tif", ".tiff")
 
 
 def score_features(subject: str, from_raw: str, has_reply_header: bool,
-                   doc_names: list[str], body_is_short) -> tuple[int, list[str]]:
-    """Считает балл по уже вытащенным признакам письма.
+                   doc_names: list[str], body_is_short) -> tuple[int, list[str], bool]:
+    """Считает балл по признакам письма.
+
+    Возвращает (балл, причины, есть ли тематический признак).
+
+    Тематический признак — это то, что отличает согласование от любой
+    другой деловой переписки: слово про согласование или топосъёмку в теме
+    либо в имени файла, ссылка на наш исходящий номер, пустое тело при
+    документе во вложении. Без него «ответ + корпоративный домен» даёт
+    те же баллы договорам, счетам и запросам КП.
 
     body_is_short: True/False, либо None — если размер тела неизвестен
     (тогда за него баллы просто не начисляются, а не угадываются).
@@ -95,6 +105,7 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
 
     score = 0
     reasons: list[str] = []
+    has_topic = False
 
     if has_reply_header:
         score += 2
@@ -107,10 +118,12 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
         if pattern.search(subject):
             score += 2
             reasons.append(label)
+            has_topic = True
             break
 
     if not subject.strip():
         score += 1
+        has_topic = True
         reasons.append("темы нет совсем")
 
     if doc_names:
@@ -118,11 +131,14 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
         reasons.append(f"документ во вложении: {doc_names[0]}")
         if body_is_short:
             score += 2
+            has_topic = True
             reasons.append("тело пустое или в одну строку — суть во вложении")
         matched = next((n for n in doc_names if _DOC_NAME_RE.search(n)), None)
         if matched:
             score += 2
-            reasons.append(f"в имени файла согласование или топосъёмка: {matched}")
+            has_topic = True
+            reasons.append(f"в имени файла согласование, топосъёмка или "
+                           f"исходящий номер: {matched}")
 
     if _ROBOT_RE.search(sender_email):
         score -= 3
@@ -137,7 +153,7 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
             score += 1
             reasons.append("домен профильной организации")
 
-    return score, reasons
+    return score, reasons, has_topic
 
 
 def score_message(msg, uid: str = "", flags=None) -> dict:
@@ -155,7 +171,7 @@ def score_message(msg, uid: str = "", flags=None) -> dict:
     doc_names = [a["filename"] for a in attachments
                  if a["filename"].lower().endswith(DOC_EXTENSIONS)]
 
-    score, reasons = score_features(
+    score, reasons, has_topic = score_features(
         subject, from_raw,
         bool(msg.get("In-Reply-To") or msg.get("References")),
         doc_names, len(own_text.strip()) < SHORT_BODY,
@@ -170,6 +186,7 @@ def score_message(msg, uid: str = "", flags=None) -> dict:
         "date": msg.get("Date", ""),
         "attachments": [a["filename"] for a in attachments],
         "has_document": bool(doc_names),
+        "has_topic_signal": has_topic,
         "body_preview": own_text[:200],
         "flags": flags,
     }
@@ -231,7 +248,7 @@ def score_meta(meta: dict) -> dict:
     size = meta.get("text_size")
     body_is_short = None if size is None else size < SHORT_BODY
 
-    score, reasons = score_features(
+    score, reasons, has_topic = score_features(
         meta["subject"], meta["from"], meta["has_reply_header"],
         doc_names, body_is_short,
     )
@@ -244,6 +261,7 @@ def score_meta(meta: dict) -> dict:
         "date": meta["date"],
         "attachments": meta["attachments"],
         "has_document": bool(doc_names),
+        "has_topic_signal": has_topic,
         "text_size": size,
         "flags": meta["flags"],
     }
@@ -270,7 +288,8 @@ def _scan_metadata(imap, uids: list[str]) -> list[dict]:
 def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
                           date_to: str = "", min_score: int = DEFAULT_MIN_SCORE,
                           limit: int = 50, unseen_only: bool = False,
-                          max_scan: int = DEFAULT_MAX_SCAN) -> dict:
+                          max_scan: int = DEFAULT_MAX_SCAN,
+                          require_topic: bool = True) -> dict:
     try:
         criteria = build_criteria(None, "both", date_from, date_to, "",
                                   False, unseen_only)
@@ -279,6 +298,7 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
 
     candidates = []
     histogram: dict[int, int] = {}
+    skipped_no_topic = 0
     with _imap_connection() as imap:
         _select(imap, folder)
         uids, mode = _search_uids(imap, criteria)
@@ -297,6 +317,12 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
         for meta in _scan_metadata(imap, uids):
             item = score_meta(meta)
             histogram[item["score"]] = histogram.get(item["score"], 0) + 1
+            if require_topic and not item["has_topic_signal"]:
+                # «Ответ + корпоративный домен» набирает те же баллы у
+                # договоров, счетов и запросов КП — без темы про
+                # согласование это не кандидат
+                skipped_no_topic += 1
+                continue
             if item["score"] >= min_score:
                 candidates.append(item)
 
@@ -309,6 +335,8 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
         "scanned": total_matched - skipped,
         "found": len(candidates),
         "min_score": min_score,
+        "require_topic": require_topic,
+        "skipped_without_topic": skipped_no_topic,
         # Сколько писем набрало каждый балл — видно, куда двигать порог,
         # не перебирая значения вызовами
         "score_histogram": dict(sorted(histogram.items())),
@@ -339,7 +367,8 @@ def register_tools(mcp):
                                  min_score: int = DEFAULT_MIN_SCORE,
                                  limit: int = 50,
                                  unseen_only: bool = False,
-                                 max_scan: int = DEFAULT_MAX_SCAN) -> dict:
+                                 max_scan: int = DEFAULT_MAX_SCAN,
+                                 require_topic: bool = True) -> dict:
         """Найти письма, похожие на ответы-согласования от организаций.
 
         Отбирает не по слову «согласование» (в таких письмах его обычно нет),
@@ -365,11 +394,16 @@ def register_tools(mcp):
             max_scan: Сколько писем просмотреть, начиная со свежих. Если в
                 папке их больше, в ответе придут skipped_older и note —
                 отброшенное не замалчивается
+            require_topic: Требовать тематический признак — слово про
+                согласование или топосъёмку в теме либо в имени файла,
+                исходящий номер, пустое тело при документе. Без него
+                «ответ + корпоративный домен» набирает те же баллы у
+                договоров и запросов КП
         """
         try:
             return _find_candidates_impl(folder, date_from, date_to,
                                          min_score, limit, unseen_only,
-                                         max_scan)
+                                         max_scan, require_topic)
         except Exception as exc:
             log.error(f"find_approval_candidates: {exc}")
             return {"error": str(exc)}

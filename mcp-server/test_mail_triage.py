@@ -166,9 +166,9 @@ class TestMetadataScoring(unittest.TestCase):
 
     def test_unknown_body_size_does_not_add_points(self):
         """Размер тела неизвестен — балл за «пустое тело» не выдаётся."""
-        with_size, _ = mail_triage.score_features(
+        with_size, _, _ = mail_triage.score_features(
             "Информация", "x@kochubgaz.ru", False, ["a.pdf"], True)
-        unknown, reasons = mail_triage.score_features(
+        unknown, reasons, _ = mail_triage.score_features(
             "Информация", "x@kochubgaz.ru", False, ["a.pdf"], None)
         self.assertEqual(with_size - unknown, 2)
         self.assertNotIn("тело пустое или в одну строку — суть во вложении",
@@ -205,7 +205,7 @@ class TestRecallFeatures(unittest.TestCase):
             make(subject="", body="",
                  attachments=["Согласовано_топосъемка_Факел.pdf"]), "1")
         joined = " ".join(result["reasons"])
-        self.assertIn("в имени файла согласование или топосъёмка", joined)
+        self.assertIn("в имени файла согласование, топосъёмка", joined)
         self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
 
     def test_organization_on_free_mail_is_not_a_robot(self):
@@ -233,6 +233,44 @@ class TestRecallFeatures(unittest.TestCase):
             make(subject="привет, как дела", sender="Друг <friend@gmail.com>",
                  body="созвонимся завтра"), "1")
         self.assertLess(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+
+class TestTopicGate(unittest.TestCase):
+    """Тематический признак отделяет согласования от прочей переписки."""
+
+    def test_business_reply_without_topic_is_not_a_candidate(self):
+        """Договор с корпоративного домена набирает баллы, но темы нет."""
+        msg = make(subject="RE: Ставропольгеодезия_Вольфрам",
+                   sender="Астафьева <aal@omsk.tavrida.ru>",
+                   body="во вложении договор, посмотрите " * 10,
+                   attachments=["Договор №57.docx"], reply=True)
+        result = mail_triage.score_message(msg, "1")
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+        self.assertFalse(result["has_topic_signal"])
+
+    def test_approval_reply_has_topic_signal(self):
+        msg = make(subject="RE: О согласовании топосъёмки",
+                   sender="ПТО <pto@kochubgaz.ru>", body="", reply=True)
+        self.assertTrue(mail_triage.score_message(msg, "1")["has_topic_signal"])
+
+    def test_outgoing_number_in_filename_counts(self):
+        """Единственное письмо эталона без темы: исх. номер в имени файла."""
+        msg = make(subject="RE: Письмо_Теплоэнерго_Кисловодск.pdf",
+                   sender="<gpte@gpte26.ru>", body="текст " * 80,
+                   attachments=["Исх_2026_668-08.pdf"], reply=True)
+        result = mail_triage.score_message(msg, "1")
+        self.assertTrue(result["has_topic_signal"])
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_empty_body_with_document_counts_as_topic(self):
+        msg = make(subject="Информация", sender="x@gupsktek.ru", body="",
+                   attachments=["1108.pdf"])
+        self.assertTrue(mail_triage.score_message(msg, "1")["has_topic_signal"])
+
+    def test_score_meta_reports_topic_signal(self):
+        meta = mail_triage.parse_meta_item(TestMetadataScoring.PREFIX,
+                                           TestMetadataScoring.HEADERS)
+        self.assertTrue(mail_triage.score_meta(meta)["has_topic_signal"])
 
 
 if __name__ == "__main__":
