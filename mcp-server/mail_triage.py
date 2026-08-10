@@ -60,8 +60,28 @@ _SUBJECT_PATTERNS = (
 # Те же слова в имени приложенного файла: «Согласовано_топосъемка_Факел.pdf»
 # — сигнал не слабее темы, а темы у таких писем часто нет вовсе.
 _DOC_NAME_RE = re.compile(
-    r"(согласован|топосъ[её]м|топограф|топоплан|исх[._\s-]*(№|n)?\s*\d)",
-    re.IGNORECASE)
+    r"(согласован|согласовать|топосъ[её]м|топограф|топоплан|"
+    r"исх[._\s-]*(№|n)?\s*\d)", re.IGNORECASE)
+
+# Документы, которые организации шлют пачками, но к согласованиям они не
+# относятся: бухгалтерия, кадры, реклама, проектная документация целиком.
+_STOP_RE = re.compile(
+    r"(упд|акт\s*сверки|счет[-\s]*фактур|сч[её]т\s*№|резюме|вакансия|"
+    r"трудоустройств|презентац|реклам|закрывающие\s+документ|"
+    r"раздел\s*пд|разрешение\s+на\s+строительство|приказ|"
+    r"коммерческ\w*\s+предложени|запрос\s+кп|прайс|тариф)", re.IGNORECASE)
+
+# Наш собственный адрес: копии наших исходящих не должны попадать в отбор
+_SELF_VARS = ("MAIL_USERNAME", "MAIL_LOGIN", "MAIL_USER", "IMAP_USER",
+              "MAIL_ADDRESS", "EMAIL_USER")
+
+
+def self_addresses() -> set[str]:
+    """Адреса самого ящика — письма от себя не разбираем."""
+    import os
+    found = {os.environ.get(name, "").strip().lower()
+             for name in _SELF_VARS}
+    return {a for a in found if "@" in a}
 
 # Роботы и площадки: согласования оттуда не приходят никогда
 _ROBOT_RE = re.compile(
@@ -123,22 +143,36 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
 
     if not subject.strip():
         score += 1
-        has_topic = True
         reasons.append("темы нет совсем")
+        if doc_names and _ORG_HINT_RE.search(domain):
+            # Три письма эталона выглядят именно так: темы нет, отправитель —
+            # профильная организация, всё содержание в приложенном документе
+            has_topic = True
+            reasons.append("темы нет, но письмо от профильной организации "
+                           "с документом")
 
     if doc_names:
         score += 1
         reasons.append(f"документ во вложении: {doc_names[0]}")
         if body_is_short:
-            score += 2
-            has_topic = True
-            reasons.append("тело пустое или в одну строку — суть во вложении")
+            # Слабый бонус, но не основание: у настоящих согласований тела
+            # нормальные (медиана эталона ~2700 байт), зато под «пустое тело
+            # плюс документ» идеально подходят УПД и акты сверки
+            score += 1
+            reasons.append("тело короткое — суть во вложении")
         matched = next((n for n in doc_names if _DOC_NAME_RE.search(n)), None)
         if matched:
             score += 2
             has_topic = True
             reasons.append(f"в имени файла согласование, топосъёмка или "
                            f"исходящий номер: {matched}")
+
+    stop = _STOP_RE.search(subject) or next(
+        (n for n in doc_names if _STOP_RE.search(n)), None)
+    if stop:
+        score -= 3
+        has_topic = False
+        reasons.append("бухгалтерия, кадры или реклама, а не согласование")
 
     if _ROBOT_RE.search(sender_email):
         score -= 3
@@ -299,6 +333,7 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
     candidates = []
     histogram: dict[int, int] = {}
     skipped_no_topic = 0
+    skipped_own = 0
     with _imap_connection() as imap:
         _select(imap, folder)
         uids, mode = _search_uids(imap, criteria)
@@ -314,8 +349,15 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
         if skipped:
             uids = uids[-max_scan:]
 
+        own = self_addresses()
         for meta in _scan_metadata(imap, uids):
             item = score_meta(meta)
+            sender = email.utils.parseaddr(item["from"])[1].lower()
+            if sender and sender in own:
+                # Копия нашего же исходящего письма: разбираем то, что
+                # приходит НА этот адрес, а не то, что уходит с него
+                skipped_own += 1
+                continue
             histogram[item["score"]] = histogram.get(item["score"], 0) + 1
             if require_topic and not item["has_topic_signal"]:
                 # «Ответ + корпоративный домен» набирает те же баллы у
@@ -337,6 +379,7 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
         "min_score": min_score,
         "require_topic": require_topic,
         "skipped_without_topic": skipped_no_topic,
+        "skipped_own_outgoing": skipped_own,
         # Сколько писем набрало каждый балл — видно, куда двигать порог,
         # не перебирая значения вызовами
         "score_histogram": dict(sorted(histogram.items())),

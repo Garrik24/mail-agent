@@ -170,7 +170,7 @@ class TestMetadataScoring(unittest.TestCase):
             "Информация", "x@kochubgaz.ru", False, ["a.pdf"], True)
         unknown, reasons, _ = mail_triage.score_features(
             "Информация", "x@kochubgaz.ru", False, ["a.pdf"], None)
-        self.assertEqual(with_size - unknown, 2)
+        self.assertEqual(with_size - unknown, 1)
         self.assertNotIn("тело пустое или в одну строку — суть во вложении",
                          reasons)
 
@@ -262,15 +262,80 @@ class TestTopicGate(unittest.TestCase):
         self.assertTrue(result["has_topic_signal"])
         self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
 
-    def test_empty_body_with_document_counts_as_topic(self):
+    def test_empty_body_with_document_is_not_a_topic_signal(self):
+        """Пустое тело плюс документ — это ещё и УПД, и акт сверки."""
         msg = make(subject="Информация", sender="x@gupsktek.ru", body="",
                    attachments=["1108.pdf"])
-        self.assertTrue(mail_triage.score_message(msg, "1")["has_topic_signal"])
+        self.assertFalse(mail_triage.score_message(msg, "1")["has_topic_signal"])
 
     def test_score_meta_reports_topic_signal(self):
         meta = mail_triage.parse_meta_item(TestMetadataScoring.PREFIX,
                                            TestMetadataScoring.HEADERS)
         self.assertTrue(mail_triage.score_meta(meta)["has_topic_signal"])
+
+
+class TestRulesFromEtalon(unittest.TestCase):
+    """Правила, выведенные из 29 писем папки СОГЛАСОВАНИЯ."""
+
+    def test_own_outgoing_address_detected(self):
+        import os
+        os.environ["MAIL_USERNAME"] = "stavgeo26@mail.ru"
+        try:
+            self.assertIn("stavgeo26@mail.ru", mail_triage.self_addresses())
+        finally:
+            os.environ.pop("MAIL_USERNAME", None)
+
+    def test_accounting_documents_rejected(self):
+        """УПД и акты сверки приходят с пустым телом и PDF — но это не то."""
+        for subject, filename in [
+            ("Документы подтверждающие выход рекламы", "УПД (статус 1).pdf"),
+            ("Документы за январь", "Акт сверки взаиморасчетов.pdf"),
+            ("Закрывающие документы", "Договор Акты обследования.pdf"),
+        ]:
+            with self.subTest(subject=subject):
+                msg = make(subject=subject, sender="s@stavropol.2gis.ru",
+                           body="", attachments=[filename])
+                result = mail_triage.score_message(msg, "1")
+                self.assertFalse(result["has_topic_signal"])
+
+    def test_hr_and_ads_rejected(self):
+        for subject, filename in [("Трудоустройство", "резюме1.docx"),
+                                  ("Платформа для бизнеса", "Презентация.pdf")]:
+            with self.subTest(subject=subject):
+                result = mail_triage.score_message(
+                    make(subject=subject, body="", attachments=[filename]), "1")
+                self.assertFalse(result["has_topic_signal"])
+
+    def test_project_documentation_rejected(self):
+        """Школа №54 шлёт разделы ПД с того же домена, что и согласования."""
+        result = mail_triage.score_message(
+            make(subject="школа 54 г. Ставрополь", sender="sch_54@stavadm.ru",
+                 body="", attachments=["Раздел ПД №3 (127.22-АР).pdf"]), "1")
+        self.assertFalse(result["has_topic_signal"])
+
+    def test_empty_body_alone_is_not_enough(self):
+        """Пустое тело с документом больше не открывает гейт само по себе."""
+        result = mail_triage.score_message(
+            make(subject="Документы", sender="x@some-company.ru", body="",
+                 attachments=["file.pdf"]), "1")
+        self.assertFalse(result["has_topic_signal"])
+
+    def test_no_subject_from_profile_org_passes(self):
+        """А вот письмо без темы от профильной организации — проходит."""
+        result = mail_triage.score_message(
+            make(subject="", sender="Петрова <petrovaap@stavkraygaz.ru>",
+                 body="", attachments=["39-06-07-768.pdf"]), "1")
+        self.assertTrue(result["has_topic_signal"])
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_normal_body_size_does_not_block_approval(self):
+        """У согласований тела обычные — медиана эталона около 2700 байт."""
+        result = mail_triage.score_message(
+            make(subject="О согласовании топографической съёмки",
+                 sender="o.cymbalova@skvk.ru", body="текст письма " * 200,
+                 attachments=["Ответ.pdf"], reply=True), "1")
+        self.assertTrue(result["has_topic_signal"])
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
 
 
 if __name__ == "__main__":
