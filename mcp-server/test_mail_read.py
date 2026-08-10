@@ -342,6 +342,21 @@ class TestAttachmentText(unittest.TestCase):
             self.assertIn("reason", result)
             self.assertIsInstance(result["reason"], str)
 
+    def test_blank_image_detected(self):
+        """Чёрное полотно от pypdf не должно уходить в OCR как страница."""
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow не установлен")
+        self.assertTrue(mail_read.is_blank_image(
+            Image.new("L", (100, 100), 0)))
+        self.assertTrue(mail_read.is_blank_image(
+            Image.new("RGB", (100, 100), "white")))
+
+        image = Image.new("L", (100, 100), 255)
+        image.putpixel((10, 10), 0)
+        self.assertFalse(mail_read.is_blank_image(image))
+
     def test_page_images_extracted_from_scan(self):
         try:
             import PIL  # noqa: F401

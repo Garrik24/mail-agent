@@ -17,7 +17,9 @@ aptPkgs = [
   # которым сжимают чёрно-белые сканы.
   "tesseract-ocr",
   "tesseract-ocr-rus",
-  "jbig2dec"
+  "jbig2dec",
+  # Рендер страниц PDF для OCR (pdftoppm из pdf2image)
+  "poppler-utils"
 ]
 # Если какой-то пакет не найдётся — это различие версий Debian/Ubuntu:
 #   libgdk-pixbuf-2.0-0  <->  libgdk-pixbuf2.0-0

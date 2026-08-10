@@ -14,3 +14,7 @@ pypdf>=5
 # зовёт системный tesseract (см. tesseract-ocr в nixpacks.toml / Dockerfile).
 pillow>=10
 pytesseract>=0.3.10
+# Рендер страниц PDF в картинки для OCR (обёртка над poppler-utils).
+# Извлечение вложенных картинок через pypdf на палитровых сканах отдаёт
+# чёрное полотно, поэтому страницы именно рендерятся.
+pdf2image>=1.17

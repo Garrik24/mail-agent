@@ -23,7 +23,8 @@ __all__ = ["decode_mime_header", "html_to_text", "split_quotes", "truncate",
            "extract_body", "list_attachments", "parse_flags_list", "part_filename",
            "build_message_dict", "find_attachment", "extract_pdf_text",
            "extract_docx_text", "extract_attachment_text", "ocr_pdf",
-           "ocr_available", "pdf_page_images"]
+           "ocr_available", "pdf_page_images", "render_pdf_pages",
+           "is_blank_image"]
 
 # Куски письма, после которых начинается процитированная переписка
 _QUOTE_MARKERS = (
@@ -400,6 +401,7 @@ OCR_LANG = "rus+eng"
 OCR_PAGE_TIMEOUT = 40
 # Повороты пробуются только при пустом результате, поэтому лимит жёстче
 OCR_ROTATED_TIMEOUT = 25
+OCR_RENDER_TIMEOUT = 60
 OCR_MAX_PAGES = 5
 
 
@@ -418,12 +420,24 @@ def ocr_available() -> tuple[bool, str]:
     return True, ""
 
 
-def pdf_page_images(data: bytes, max_pages: int = OCR_MAX_PAGES) -> list:
-    """Достаёт картинки страниц из PDF без poppler — через pypdf + Pillow.
+OCR_RENDER_DPI = 200
 
-    У сканов страница обычно и есть одна большая картинка. Битые объекты
-    пропускаются: одна нечитаемая картинка не должна ронять распознавание
-    всего документа.
+
+def render_pdf_pages(data: bytes, max_pages: int = OCR_MAX_PAGES,
+                     dpi: int = OCR_RENDER_DPI) -> list:
+    """Рендерит страницы PDF в картинки через poppler (pdf2image)."""
+    from pdf2image import convert_from_bytes
+
+    return convert_from_bytes(data, dpi=dpi, first_page=1, last_page=max_pages,
+                              fmt="png", timeout=OCR_RENDER_TIMEOUT)
+
+
+def embedded_page_images(data: bytes, max_pages: int = OCR_MAX_PAGES) -> list:
+    """Достаёт картинки, вложенные в страницы, через pypdf.
+
+    Запасной путь: работает без poppler, но для палитровых и ICC-изображений
+    pypdf отдаёт чёрное полотно — такие страницы отсеиваются проверкой
+    is_blank_image.
     """
     from pypdf import PdfReader
 
@@ -437,6 +451,38 @@ def pdf_page_images(data: bytes, max_pages: int = OCR_MAX_PAGES) -> list:
         except Exception as exc:
             log.warning(f"Не удалось извлечь картинки страницы: {exc}")
     return images
+
+
+def is_blank_image(image) -> bool:
+    """True, если картинка сплошь одного цвета — распознавать там нечего."""
+    try:
+        extrema = image.convert("L").getextrema()
+    except Exception:
+        return False
+    return extrema[0] == extrema[1]
+
+
+def pdf_page_images(data: bytes, max_pages: int = OCR_MAX_PAGES) -> list:
+    """Картинки страниц PDF: сначала честный рендер, потом запасной путь.
+
+    Рендер через poppler даёт страницу такой, какой её видит человек. Раньше
+    здесь стояло извлечение вложенных картинок через pypdf — на палитровых
+    сканах оно отдавало полностью чёрные полотна (яркость 0), и OCR честно
+    ничего не находил.
+    """
+    try:
+        images = render_pdf_pages(data, max_pages)
+        if images:
+            return images
+        log.warning("Рендер PDF вернул пустой список страниц")
+    except Exception as exc:
+        log.warning(f"Рендер PDF через poppler не удался: {exc}")
+
+    images = embedded_page_images(data, max_pages)
+    usable = [i for i in images if not is_blank_image(i)]
+    if images and not usable:
+        log.warning("Вложенные картинки страниц пустые (одноцветные)")
+    return usable or images
 
 
 # Картинки мельче этого — логотипы и подписи в бланке, не страница скана
@@ -553,9 +599,13 @@ def ocr_pdf(data: bytes, max_chars: int = 5000,
 
     if not images:
         return {"ok": False,
-                "reason": "нет текстового слоя и нет картинок страниц — "
-                          "возможно, PDF в формате, который не разбирается "
-                          "(например JBIG2 без jbig2dec)"}
+                "reason": "нет текстового слоя, и страницы не отрендерились — "
+                          "проверьте, что установлен poppler-utils"}
+    if all(is_blank_image(i) for i in images):
+        return {"ok": False,
+                "reason": "нет текстового слоя, а страницы отрендерились "
+                          "пустыми — вложение, вероятно, повреждено",
+                "images_info": [describe_image(i) for i in images[:4]]}
 
     # Крупные картинки — это страницы скана; мелочь (логотип, подпись в
     # бланке) только тратит время. Если крупных нет — распознаём всё подряд.
