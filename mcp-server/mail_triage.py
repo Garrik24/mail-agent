@@ -28,7 +28,10 @@ except ImportError:  # пакетный импорт
 log = logging.getLogger(__name__)
 
 MAX_SCAN = 200
-DEFAULT_MIN_SCORE = 3
+# Порог 3 ловит вообще всю деловую переписку с вложениями (договоры, УПД,
+# тендеры): на живом ящике это 67 писем из 200. При 5 остаётся короткий
+# проверяемый список — те самые ответы организаций.
+DEFAULT_MIN_SCORE = 5
 SHORT_BODY = 200
 
 # Темы ответов на наши исходящие. Слова «согласование» тут может и не быть.
@@ -140,6 +143,7 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
         return {"error": f"Некорректная дата (ожидается YYYY-MM-DD): {exc}"}
 
     scanned, candidates = 0, []
+    histogram: dict[int, int] = {}
     with _imap_connection() as imap:
         _select(imap, folder)
         uids, mode = _search_uids(imap, criteria)
@@ -158,6 +162,7 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
                 continue
             scanned += 1
             item = score_message(msg, uid, flags)
+            histogram[item["score"]] = histogram.get(item["score"], 0) + 1
             if item["score"] >= min_score:
                 candidates.append(item)
 
@@ -169,6 +174,9 @@ def _find_candidates_impl(folder: str = "INBOX", date_from: str = "",
         "scanned": scanned,
         "found": len(candidates),
         "min_score": min_score,
+        # Сколько писем набрало каждый балл — видно, куда двигать порог,
+        # не перебирая значения вызовами
+        "score_histogram": histogram,
         "candidates": trimmed,
         "uids": [c["uid"] for c in trimmed],
         "hint": ("Письма не перемещены. Проверьте список и вызовите "
@@ -201,7 +209,10 @@ def register_tools(mcp):
             folder: Где искать, обычное имя папки
             date_from: С какой даты, YYYY-MM-DD
             date_to: По какую дату включительно, YYYY-MM-DD
-            min_score: Порог балла; ниже 3 будет много лишнего
+            min_score: Порог балла. При 5 остаётся короткий проверяемый
+                список; 3 и ниже захватывает всю деловую переписку с
+                вложениями. Поле score_histogram в ответе показывает,
+                сколько писем набрало каждый балл
             limit: Сколько кандидатов вернуть
             unseen_only: Смотреть только непрочитанные
         """
