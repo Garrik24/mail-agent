@@ -490,6 +490,18 @@ def _ocr_image(pytesseract, image, lang: str) -> str:
     if _has_text(text):
         return text
 
+    # Бланки с рамками и печатями иногда не разбираются автосегментацией:
+    # psm 6 читает страницу как единый блок текста.
+    try:
+        candidate = pytesseract.image_to_string(
+            prepared, lang=lang, config="--psm 6",
+            timeout=OCR_ROTATED_TIMEOUT) or ""
+        if _has_text(candidate):
+            log.info("Страница распознана в режиме --psm 6")
+            return candidate
+    except Exception as exc:
+        log.warning(f"OCR в режиме psm 6 не удался: {exc}")
+
     for angle in (270, 90, 180):
         try:
             rotated = prepared.rotate(angle, expand=True)
@@ -502,6 +514,25 @@ def _ocr_image(pytesseract, image, lang: str) -> str:
             log.info(f"Страница распознана после поворота на {angle}°")
             return candidate
     return text
+
+
+def describe_image(image) -> str:
+    """Краткая характеристика картинки для диагностики нераспознанного скана.
+
+    Средняя яркость сразу показывает главное: если страница почти белая или
+    сплошь чёрная, значит из PDF извлеклась не та картинка, и распознавать
+    там нечего.
+    """
+    info = f"{image.size[0]}x{image.size[1]} {image.mode}"
+    try:
+        grey = image.convert("L")
+        pixels = list(grey.getdata())
+        if pixels:
+            mean = sum(pixels) / len(pixels)
+            info += f" яркость~{mean:.0f} (мин {min(pixels)}, макс {max(pixels)})"
+    except Exception as exc:
+        info += f" (яркость не посчиталась: {exc})"
+    return info
 
 
 def ocr_pdf(data: bytes, max_chars: int = 5000,
@@ -545,8 +576,7 @@ def ocr_pdf(data: bytes, max_chars: int = 5000,
                 "images": len(images),
                 # Диагностика: по размерам и режиму видно, дошла ли до OCR
                 # сама страница или только мелкие элементы бланка
-                "images_info": [f"{i.size[0]}x{i.size[1]} {i.mode}"
-                                for i in images[:8]]}
+                "images_info": [describe_image(i) for i in images[:4]]}
 
     text, truncated = truncate(text, max_chars)
     return {"ok": True, "text": text, "truncated": truncated,
