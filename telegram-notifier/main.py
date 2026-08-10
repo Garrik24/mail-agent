@@ -11,7 +11,8 @@ from datetime import datetime, timezone, timedelta
 from imap_client import fetch_recent_emails
 from classifier import classify_email, EmailCategory
 from notifier import notify, send_telegram
-from db import init_db, is_processed, mark_processed, get_all_processed_ids, cleanup_old
+from db import (init_db, is_processed, mark_processed, get_all_processed_ids,
+                cleanup_old, get_meta, set_meta)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +24,14 @@ log = logging.getLogger(__name__)
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "900"))  # 15 мин
 # Глубина поиска при первом запуске (часы)
 INITIAL_LOOKBACK_HOURS = int(os.environ.get("INITIAL_LOOKBACK_HOURS", "24"))
+# Сообщение «Mail Agent запущен» в Telegram. По умолчанию выключено: если
+# сервис перезапускается, оно превращается в поток одинаковых уведомлений.
+# Работа воркера от него не зависит — старт всегда виден в логах.
+STARTUP_NOTIFY = os.environ.get("STARTUP_NOTIFY", "false").lower() in (
+    "1", "true", "yes", "да")
+# Даже когда уведомление включено, повторять его не чаще этого интервала
+STARTUP_NOTICE_COOLDOWN_HOURS = int(
+    os.environ.get("STARTUP_NOTICE_COOLDOWN_HOURS", "6"))
 
 
 def check_emails():
@@ -71,6 +80,37 @@ def check_emails():
     )
 
 
+def maybe_notify_startup():
+    """Сообщает в Telegram о запуске, если это включено и не слишком часто.
+
+    Сообщение полезно после деплоя, но при перезапусках воркера оно
+    превращается в поток одинаковых уведомлений, поэтому по умолчанию
+    выключено, а при включении ограничено по частоте.
+    """
+    if not STARTUP_NOTIFY:
+        log.info("Уведомление о запуске отключено (STARTUP_NOTIFY)")
+        return
+
+    now = datetime.now(timezone.utc)
+    last = get_meta("last_startup_notice")
+    if last:
+        try:
+            previous = datetime.fromisoformat(last)
+            passed = (now - previous).total_seconds() / 3600
+            if passed < STARTUP_NOTICE_COOLDOWN_HOURS:
+                log.info(f"Уведомление о запуске пропущено: прошло "
+                         f"{passed:.1f} ч из {STARTUP_NOTICE_COOLDOWN_HOURS}")
+                return
+        except ValueError:
+            log.warning(f"Непонятная отметка последнего запуска: {last!r}")
+
+    send_telegram(
+        f"🤖 <b>Mail Agent запущен</b>\n"
+        f"Проверяю почту каждые {CHECK_INTERVAL // 60} минут."
+    )
+    set_meta("last_startup_notice", now.isoformat())
+
+
 def main():
     log.info("=" * 50)
     log.info("🚀 Telegram нотификатор запущен")
@@ -83,8 +123,8 @@ def main():
     # Очистка старых записей при старте
     cleanup_old(days=30)
 
-    # Уведомление о запуске
-    send_telegram("🤖 <b>Mail Agent запущен</b>\nПроверяю почту каждые 15 минут.")
+    # Уведомление о запуске — только если его явно попросили
+    maybe_notify_startup()
 
     # Первый запуск сразу
     try:

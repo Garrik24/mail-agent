@@ -23,9 +23,43 @@ def init_db():
             processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     conn.commit()
     conn.close()
     log.info(f"БД инициализирована: {DB_PATH}")
+
+
+def get_meta(key: str) -> str:
+    """Читает служебное значение. Пустая строка, если его нет."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT value FROM meta WHERE key = ?",
+                           (key,)).fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception as e:
+        log.warning(f"Не удалось прочитать meta[{key}]: {e}")
+        return ""
+
+
+def set_meta(key: str, value: str):
+    """Сохраняет служебное значение."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning(f"Не удалось сохранить meta[{key}]: {e}")
 
 
 def is_processed(message_id: str) -> bool:
