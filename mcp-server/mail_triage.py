@@ -97,9 +97,15 @@ _FREE_MAIL_RE = re.compile(
 
 # Организации, от которых приходят согласования, обычно на своём домене
 _ORG_HINT_RE = re.compile(
-    r"(gaz|vodokanal|skvk|energo|elektro|set|rzd|gup|mup|admin|gov|"
+    r"(gaz|vodokanal|voda|skvk|energo|elektro|set|rzd|gup|mup|adm|gov|"
     r"rosreestr|kadastr|tek|teplo|svyaz|rostelecom|transneft|kraygaz|"
-    r"vodokanal|geo|proekt|stroy)", re.IGNORECASE)
+    r"geo|proekt|stroy|mchs|rosseti|grad)", re.IGNORECASE)
+
+# Системы документооборота ставят в тему имя файла: «Отправка: img2025.pdf».
+# Содержания в такой теме нет — по сути это письмо без темы.
+_SERVICE_SUBJECT_RE = re.compile(
+    r"^\s*(отправка|fw|fwd)\s*:\s*[\w .()\-]+\.(pdf|docx?|tiff?|jpe?g|png)"
+    r"[\s,]*$", re.IGNORECASE)
 
 
 DOC_EXTENSIONS = (".pdf", ".docx", ".doc", ".tif", ".tiff")
@@ -141,9 +147,11 @@ def score_features(subject: str, from_raw: str, has_reply_header: bool,
             has_topic = True
             break
 
-    if not subject.strip():
+    service_subject = bool(_SERVICE_SUBJECT_RE.match(subject))
+    if not subject.strip() or service_subject:
         score += 1
-        reasons.append("темы нет совсем")
+        reasons.append("темы нет совсем" if not subject.strip()
+                       else "вместо темы имя файла — служебная отправка")
         if doc_names and _ORG_HINT_RE.search(domain):
             # Три письма эталона выглядят именно так: темы нет, отправитель —
             # профильная организация, всё содержание в приложенном документе

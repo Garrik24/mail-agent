@@ -277,6 +277,29 @@ class TestTopicGate(unittest.TestCase):
 class TestRulesFromEtalon(unittest.TestCase):
     """Правила, выведенные из 29 писем папки СОГЛАСОВАНИЯ."""
 
+    def test_service_subject_is_treated_as_no_subject(self):
+        """«Отправка: img20250418.pdf» — тема без содержания."""
+        result = mail_triage.score_message(
+            make(subject="Отправка: img20250418_10363024.pdf",
+                 sender="ПТО <Tatarkulov-AM@stv.rossetisk.ru>", body="",
+                 attachments=["img20250418_10363024.pdf"]), "1")
+        self.assertTrue(result["has_topic_signal"])
+        self.assertGreaterEqual(result["score"], mail_triage.DEFAULT_MIN_SCORE)
+
+    def test_city_administration_domain_recognised(self):
+        """stavadm.ru — Комитет градостроительства, домен профильный."""
+        result = mail_triage.score_message(
+            make(subject="", sender="Комитет <grad@stavadm.ru>", body="",
+                 attachments=["82237785 (1).pdf"]), "1")
+        self.assertTrue(result["has_topic_signal"])
+
+    def test_meaningful_subject_is_not_service(self):
+        """Обычная тема с упоминанием файла служебной не считается."""
+        result = mail_triage.score_message(
+            make(subject="Отправка: документы по объекту и смета на работы",
+                 sender="x@some.ru", body="", attachments=["a.pdf"]), "1")
+        self.assertFalse(result["has_topic_signal"])
+
     def test_own_outgoing_address_detected(self):
         import os
         os.environ["MAIL_USERNAME"] = "stavgeo26@mail.ru"
