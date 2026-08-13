@@ -54,6 +54,7 @@
   table.sigrow { width: 100%; border-collapse: collapse; }
   table.sigrow td { border: none; padding: 0; vertical-align: bottom; }
   .stamp { position: absolute; left: 58mm; top: -9mm; width: 46mm; height: auto; z-index: -1; } /* печать ЗА подписью */
+  .ip-signature { position: absolute; left: 100mm; top: -10mm; width: 26mm; height: auto; } /* роспись над строкой подписи */
 
   .contact { font-size: 10pt; margin-top: 10mm; }
 </style>
@@ -136,6 +137,7 @@
     </tr></table>
     {% endif %}
     {% if stamp %}<img class="stamp" src="{{ stamp }}">{% endif %}
+    {% if ip_signature %}<img class="ip-signature" src="{{ ip_signature }}">{% endif %}
   </div>
 
   <div class="contact">Контакт для связи: Игорь Александрович, тел. +7 928 821-11-40</div>

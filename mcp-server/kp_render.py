@@ -179,10 +179,14 @@ def _strip_trailing_dot(text: str) -> str:
     return text
 
 
-def _ip_stamp_uri() -> str:
-    """Печать ИП: assets/kp/stamp_ip.* — если файла нет, КП идёт без печати."""
+def _kp_asset_uri(stem: str) -> str:
+    """Ассет ИП-версии по имени без расширения (assets/kp/<stem>.*).
+
+    stamp_ip — печать ИП, signature_ip — скан подписи Коровко И.А. для
+    документов без печати. Файла нет — блок просто не выводится.
+    """
     for path in sorted(glob.glob(os.path.join(BASE_DIR, "assets", "kp",
-                                              "stamp_ip.*"))):
+                                              stem + ".*"))):
         uri = _data_uri(path)
         if uri:
             return uri
@@ -219,7 +223,8 @@ def render_kp_html(*, entity: str = "ooo", kp_number: str = "",
     return _TEMPLATE.render(
         is_ooo=is_ooo,
         banner=_data_uri(BANNER_PATH) if is_ooo else "",
-        stamp=_data_uri(STAMP_OOO_PATH) if is_ooo else _ip_stamp_uri(),
+        stamp=_data_uri(STAMP_OOO_PATH) if is_ooo else _kp_asset_uri("stamp_ip"),
+        ip_signature="" if is_ooo else _kp_asset_uri("signature_ip"),
         logo_rows=logo_rows,
         kp_number=kp_number.strip(),
         date_str=date_str,

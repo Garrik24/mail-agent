@@ -192,6 +192,21 @@ def test_html_no_double_dot_when_fields_end_with_period():
     assert "аванса.." not in html
 
 
+def test_html_ip_signature_appears_when_file_exists(tmp_path, monkeypatch):
+    import kp_render
+    # без файла подписи блока нет
+    html = render_kp_html(**_minimal_kwargs(entity="ip"))
+    assert 'class="ip-signature"' not in html
+    # файл появился — подпись выводится (печати ИП по-прежнему нет)
+    kp_dir = tmp_path / "assets" / "kp"
+    kp_dir.mkdir(parents=True)
+    (kp_dir / "signature_ip.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    monkeypatch.setattr(kp_render, "BASE_DIR", str(tmp_path))
+    html = render_kp_html(**_minimal_kwargs(entity="ip"))
+    assert 'class="ip-signature"' in html
+    assert 'class="stamp"' not in html
+
+
 def test_html_rejects_bad_entity():
     with pytest.raises(ValueError):
         render_kp_html(**_minimal_kwargs(entity="zao"))
