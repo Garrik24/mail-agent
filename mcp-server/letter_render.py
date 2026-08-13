@@ -5,7 +5,6 @@ import json
 import base64
 import mimetypes
 from jinja2 import Template
-from weasyprint import HTML
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STAMP_PATH = os.path.join(BASE_DIR, "assets", "stamp.jpg")          # файл печати/подписи
@@ -54,6 +53,9 @@ def render_letter_pdf(*, addressee: str, isx_number: str, date_str: str, subject
     paragraphs — список словарей вида {"text": "...", "italic": False}.
     Возвращает байты готового PDF.
     """
+    # WeasyPrint лениво: модуль импортируется и без системных библиотек
+    # рендера (например, в тестах прописи/шаблонов на локальной машине).
+    from weasyprint import HTML
     html = _TEMPLATE.render(
         addressee_lines=[ln for ln in addressee.split("\n") if ln.strip()],
         isx_number=isx_number,

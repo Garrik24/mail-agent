@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 14mm 15mm 16mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Liberation Serif", "Times New Roman", serif; font-size: 12pt; color: #000; line-height: 1.3; margin: 0; }
+
+  /* Шапка ООО: баннер во всю ширину листа (вылет в поля страницы),
+     под ним реквизиты по центру фирменным бирюзовым. */
+  .banner { display: block; width: 210mm; margin: -14mm 0 0 -15mm; }
+  .requisites { text-align: center; color: #13616F; font-size: 9.5pt; line-height: 1.35; margin-top: 2mm; padding-bottom: 2mm; border-bottom: 0.6pt solid #13616F; }
+
+  /* Шапка ИП: простая текстовая, без баннера. */
+  .ip-head { text-align: center; padding-bottom: 2mm; border-bottom: 0.6pt solid #13616F; }
+  .ip-head .name { font-weight: bold; font-size: 13pt; }
+  .ip-head .req { color: #13616F; font-size: 9.5pt; }
+
+  .addressee { width: 60%; margin-left: 40%; margin-top: 8mm; text-align: right; font-style: italic; }
+
+  .kp-title { text-align: center; font-weight: bold; font-size: 14pt; margin: 8mm 0 0 0; }
+  .kp-date { text-align: center; font-style: italic; margin: 2mm 0 6mm 0; }
+
+  .object { margin: 0 0 4mm 0; text-align: justify; }
+  .object div { margin-bottom: 1mm; }
+
+  p.b { text-align: justify; text-indent: 1.27cm; margin: 0 0 8pt 0; }
+  p.b.bold { font-weight: bold; }
+  p.b.italic { font-style: italic; }
+
+  table.works { width: 100%; border-collapse: collapse; margin: 3mm 0 5mm 0; }
+  table.works th, table.works td { border: 0.6pt solid #7a7a7a; padding: 1.5mm 2mm; vertical-align: middle; }
+  table.works th { background: #E8F1F3; font-weight: bold; text-align: center; }
+  table.works td.num, table.works td.vol, table.works td.price { text-align: center; }
+  /* Запрет разрыва строки таблицы между страницами. */
+  table.works tr { page-break-inside: avoid; break-inside: avoid; }
+
+  .price-line { text-align: center; font-weight: bold; margin: 5mm 0; }
+  .nowrap { white-space: nowrap; }
+
+  .kv { margin: 0 0 3mm 0; text-align: justify; }
+  .kv .k { font-weight: bold; }
+
+  /* Блок клиентов — всегда с новой страницы. */
+  .clients { page-break-before: always; }
+  .clients h2 { color: #1F7A8C; font-size: 16pt; text-align: center; font-weight: bold; margin: 4mm 0 8mm 0; }
+  table.logos { width: 100%; border-collapse: collapse; page-break-inside: avoid; break-inside: avoid; }
+  table.logos td { border: none; width: 20%; text-align: center; vertical-align: middle; padding: 4mm 2mm; }
+  table.logos img { max-width: 30mm; max-height: 13mm; }
+
+  .signature { position: relative; margin-top: 16mm; page-break-inside: avoid; break-inside: avoid; }
+  table.sigrow { width: 100%; border-collapse: collapse; }
+  table.sigrow td { border: none; padding: 0; vertical-align: bottom; }
+  .stamp { position: absolute; left: 58mm; top: -9mm; width: 46mm; height: auto; z-index: -1; } /* печать ЗА подписью */
+
+  .contact { font-size: 10pt; margin-top: 10mm; }
+</style>
+</head>
+<body>
+  {% if is_ooo %}
+    {% if banner %}<img class="banner" src="{{ banner }}">{% endif %}
+    <div class="requisites">
+      355002, г. Ставрополь, ул. Тельмана, д. 41, оф. 37<br>
+      Тел.: +7 (938) 350-74-00&nbsp;&nbsp;·&nbsp;&nbsp;сайт: ставропольгеодезия.рф&nbsp;&nbsp;·&nbsp;&nbsp;почта: stavgeo26@mail.ru<br>
+      ИНН 2634103024&nbsp;&nbsp;КПП 263401001&nbsp;&nbsp;ОГРН 1182651013786
+    </div>
+  {% else %}
+    <div class="ip-head">
+      <div class="name">Индивидуальный предприниматель Коровко Игорь Александрович</div>
+      <div class="req">Тел.: +7 928 821-11-40&nbsp;&nbsp;·&nbsp;&nbsp;почта: stavgeo26@mail.ru</div>
+    </div>
+  {% endif %}
+
+  <div class="addressee">
+    {% for line in addressee_lines %}<div>{{ line }}</div>{% endfor %}
+  </div>
+
+  <div class="kp-title">КОММЕРЧЕСКОЕ ПРЕДЛОЖЕНИЕ{% if kp_number %} № {{ kp_number }}{% endif %}</div>
+  <div class="kp-date">{% if kp_number %}от {% endif %}{{ date_str }}</div>
+
+  <div class="object">
+    <div><span class="k" style="font-weight:bold">Объект:</span> {{ object_name }}</div>
+    {% if object_address %}<div><span style="font-weight:bold">Адрес объекта:</span> {{ object_address }}</div>{% endif %}
+    {% if cadastral_number %}<div><span style="font-weight:bold">Кадастровый номер участка:</span> {{ cadastral_number }}</div>{% endif %}
+  </div>
+
+  {% for p in paragraphs %}
+    <p class="b{% if p.bold %} bold{% endif %}{% if p.italic %} italic{% endif %}">{{ p.text }}</p>
+  {% endfor %}
+
+  {% if works_rows %}
+  <table class="works">
+    <tr><th style="width:8%">№</th><th>Наименование работ</th><th style="width:18%">Объём</th><th style="width:22%">Стоимость, руб.</th></tr>
+    {% for row in works_rows %}
+    <tr>
+      <td class="num">{{ loop.index }}</td>
+      <td>{{ row.name }}</td>
+      <td class="vol">{{ row.volume }}</td>
+      <td class="price">{{ row.price }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  <div class="price-line">Стоимость работ: <span class="nowrap">{{ money.digits }}</span> ({{ money.words }}).</div>
+
+  <div class="kv"><span class="k">Порядок оплаты:</span> {{ payment_terms }}.</div>
+  <div class="kv"><span class="k">Результат работ:</span> {{ result }}.</div>
+  <div class="kv"><span class="k">Срок выполнения:</span> {{ timeline }}.</div>
+  {% if validity %}<div class="kv"><span class="k">Срок действия предложения:</span> {{ validity }}.</div>{% endif %}
+
+  {% if is_ooo %}
+  <div class="clients">
+    <h2>НАШИ КЛИЕНТЫ</h2>
+    <table class="logos">
+      {% for row in logo_rows %}
+      <tr>{% for logo in row %}<td><img src="{{ logo }}"></td>{% endfor %}</tr>
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="signature">
+    {% if is_ooo %}
+    <div>Генеральный директор</div>
+    <table class="sigrow"><tr>
+      <td>ООО «Ставропольгеодезия»</td>
+      <td style="text-align:right">И.А. Коровко</td>
+    </tr></table>
+    {% else %}
+    <table class="sigrow"><tr>
+      <td>Индивидуальный предприниматель</td>
+      <td style="text-align:right">И.А. Коровко</td>
+    </tr></table>
+    {% endif %}
+    {% if stamp %}<img class="stamp" src="{{ stamp }}">{% endif %}
+  </div>
+
+  <div class="contact">Контакт для связи: Игорь Александрович, тел. +7 928 821-11-40</div>
+</body>
+</html>
