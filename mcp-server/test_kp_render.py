@@ -183,6 +183,15 @@ def test_html_ip_has_no_ooo_artifacts():
     assert "ИНН 2634103024" not in html  # реквизиты ООО не выводятся
 
 
+def test_html_no_double_dot_when_fields_end_with_period():
+    html = render_kp_html(**_minimal_kwargs(
+        result="Технический отчёт.",
+        timeline="10 рабочих дней с момента поступления аванса.",
+    ))
+    assert "Технический отчёт.." not in html
+    assert "аванса.." not in html
+
+
 def test_html_rejects_bad_entity():
     with pytest.raises(ValueError):
         render_kp_html(**_minimal_kwargs(entity="zao"))

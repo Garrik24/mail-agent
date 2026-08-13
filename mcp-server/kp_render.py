@@ -170,6 +170,15 @@ def parse_works_table(works_table: str) -> list:
     return result
 
 
+def _strip_trailing_dot(text: str) -> str:
+    """Шаблон сам ставит точку в конце блока — одну завершающую убираем,
+    чтобы не получалось «..» (многоточие не трогаем)."""
+    text = text.strip()
+    if text.endswith(".") and not text.endswith(".."):
+        return text[:-1]
+    return text
+
+
 def _ip_stamp_uri() -> str:
     """Печать ИП: assets/kp/stamp_ip.* — если файла нет, КП идёт без печати."""
     for path in sorted(glob.glob(os.path.join(BASE_DIR, "assets", "kp",
@@ -221,10 +230,10 @@ def render_kp_html(*, entity: str = "ooo", kp_number: str = "",
         paragraphs=parse_body(body),
         works_rows=parse_works_table(works_table),
         money=money,
-        payment_terms=payment_terms.strip() or DEFAULT_PAYMENT_TERMS,
-        result=result,
-        timeline=timeline,
-        validity=validity,
+        payment_terms=_strip_trailing_dot(payment_terms) or DEFAULT_PAYMENT_TERMS,
+        result=_strip_trailing_dot(result),
+        timeline=_strip_trailing_dot(timeline),
+        validity=_strip_trailing_dot(validity),
     )
 
 
