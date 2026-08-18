@@ -657,6 +657,8 @@ class IMAPClient:
         cc_override: если указан — используется вместо оригинальных CC
         attachments_json: JSON-список вложений с base64-содержимым.
         attachment_ids_json: JSON-список upload_id из chunked-upload.
+
+        body ожидается в HTML (нормализуется в tools.send_reply).
         """
         original = self.get_email_body(email_uid, folder)
         if "error" in original:
@@ -696,7 +698,9 @@ class IMAPClient:
         if cc_emails:
             msg["Cc"] = ", ".join(cc_emails)
 
-        msg.attach(MIMEText(body, "plain", "utf-8"))
+        # HTML: тело приходит уже нормализованным (sanitize.prepare_body),
+        # в text/plain теги показались бы получателю как обычный текст.
+        msg.attach(MIMEText(body, "html", "utf-8"))
 
         attached_files = attach_base64_files(msg, attachments_json)
         uploaded_ids = attach_uploaded_files(msg, attachment_ids_json)

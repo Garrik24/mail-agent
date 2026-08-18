@@ -9,6 +9,7 @@ import os
 
 import attachment_storage
 from imap_client import IMAPClient
+from sanitize import prepare_body
 
 log = logging.getLogger(__name__)
 
@@ -255,7 +256,8 @@ def register_tools(mcp):
 
         Args:
             email_uid: UID письма, на которое отвечаем
-            body: Текст ответа
+            body: Текст ответа. Можно обычным текстом с переносами строк —
+                  сервер сам разобьёт его на абзацы; HTML тоже принимается.
             folder: Папка, где находится оригинальное письмо
             reply_all: True = ответить всем (отправитель + CC + другие To).
                        False = ответить только отправителю.
@@ -270,6 +272,8 @@ def register_tools(mcp):
                             (который ограничен размером tool call).
                             Файлы удаляются после отправки.
         """
+        body = prepare_body(body)
+
         @_with_imap
         def _run(client: IMAPClient):
             cc_list = None
@@ -321,7 +325,8 @@ def register_tools(mcp):
         Args:
             to: Email получателя (например, client@example.com)
             subject: Тема письма
-            body: Текст письма (HTML разметка поддерживается)
+            body: Текст письма. HTML разметка поддерживается; обычный текст
+                  с переносами строк тоже — сервер разобьёт его на абзацы.
             cc: Копия — email через запятую (необязательно)
             attachment_urls: URL файлов для вложения через запятую (прямые ссылки или Яндекс.Диск). Необязательно.
             attachments: JSON-список вложений вида
@@ -333,6 +338,8 @@ def register_tools(mcp):
                             (который ограничен размером tool call).
                             Файлы удаляются после отправки.
         """
+        body = prepare_body(body)
+
         @_with_imap
         def _run(client: IMAPClient):
             cc_list = None
@@ -509,7 +516,9 @@ def register_tools(mcp):
             yadisk_url: ссылка на материалы (Я.Диск). Если задана — добавится отдельной строкой и в тело письма.
             appendix: текст после слова "Приложение:". Пусто = блок не выводится.
             cc: копия (несколько — через запятую). Для рассылок согласований сюда обычно arsenal57737@mail.ru.
-            email_body: HTML-тело письма-сопроводиловки. Пусто = соберётся автоматически.
+            email_body: тело письма-сопроводиловки (HTML или обычный текст
+                с переносами — сервер нормализует). Пусто = соберётся автоматически.
+                Не путать с body: body — это содержимое PDF на бланке.
             pdf_filename: имя файла вложения.
             executor / executor_phone: исполнитель и телефон в подвале письма.
             attach_pdf: прикладывать ли собранный PDF (по умолчанию да).
@@ -517,6 +526,8 @@ def register_tools(mcp):
         Returns:
             JSON-строка с результатом отправки.
         """
+        email_body = prepare_body(email_body)
+
         # --- рендер PDF (общий с preview_letter) ---
         try:
             pdf = _render_letter_pdf(

@@ -10,6 +10,7 @@ import json
 import logging
 
 from imap_client import IMAPClient
+from sanitize import prepare_body
 from tools import _public_base_url
 
 log = logging.getLogger(__name__)
@@ -157,8 +158,9 @@ def register_tools(mcp):
         Args:
             to: email получателя (несколько — через запятую).
             subject: тема письма.
-            email_body: короткое сопроводительное письмо, НАСТОЯЩИЙ HTML
-                (<p>…</p>, как у send_letter; переносы '\\n' не работают).
+            email_body: короткое сопроводительное письмо — HTML (<p>…</p>)
+                или обычный текст с переносами строк: сервер сам разобьёт
+                его на абзацы. Не путать с body (содержимое PDF КП).
             date_str: дата в готовом виде, например "«13» августа 2026 г.".
             addressee: блок адресата, строки через '\\n'.
             object_name: наименование объекта работ.
@@ -178,6 +180,8 @@ def register_tools(mcp):
         Returns:
             JSON-строка с результатом отправки.
         """
+        email_body = prepare_body(email_body)
+
         # --- рендер PDF (общий с preview_kp); упал — НЕ отправляем ---
         try:
             pdf = _render_kp_pdf(
