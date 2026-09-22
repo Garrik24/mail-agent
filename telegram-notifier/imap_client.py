@@ -18,6 +18,16 @@ IMAP_HOST = os.environ.get("MAIL_IMAP_HOST", "imap.mail.ru")
 IMAP_PORT = int(os.environ.get("MAIL_IMAP_PORT", "993"))
 MAIL_USER = os.environ.get("MAIL_USERNAME", "")
 MAIL_PASS = os.environ.get("MAIL_PASSWORD", "")
+# Таймаут сокета: без него зависшее соединение с Mail.ru останавливало бы
+# проверку навсегда — без единой ошибки в логе. Действует и на подключение,
+# и на каждое чтение (по молчанию сервера, а не по длине операции).
+IMAP_TIMEOUT = float(os.environ.get("MAIL_IMAP_TIMEOUT", "30"))
+
+# Связь с сервером потеряна: такие ошибки не глотаем по одному письму или
+# папке, а отдаём наверх — main.py считает сбои и предупреждает в Telegram.
+# Зависшее чтение даёт TimeoutError (подкласс OSError), обрыв при записи
+# imaplib заворачивает в IMAP4.abort.
+CONNECTION_ERRORS = (OSError, imaplib.IMAP4.abort)
 
 # IMAP-флаги папок, которые игнорируем
 IGNORED_FLAGS = {"\\Sent", "\\Drafts", "\\Trash", "\\Spam", "\\Junk"}
@@ -130,11 +140,16 @@ def fetch_recent_emails(since_date_str: str,
     since_date_str: формат "DD-Mon-YYYY" для IMAP SINCE.
     processed_ids: множество уже обработанных message_id.
     Возвращает список словарей с данными писем.
+
+    Ошибки связи и входа (Mail.ru не отвечает, неверный пароль) не
+    глотаются, а выбрасываются: проверка не состоялась, и об этом должен
+    узнать main.py. Письма, собранные до обрыва, не теряются — окно SINCE
+    перекрывается, и следующая проверка возьмёт их снова.
     """
     conn = None
     emails = []
     try:
-        conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
         conn.login(MAIL_USER, MAIL_PASS)
 
         folders = get_checkable_folders(conn)
@@ -202,13 +217,18 @@ def fetch_recent_emails(since_date_str: str,
                             "date": date_str,
                             "is_flagged": is_flagged,
                         })
+                    except CONNECTION_ERRORS:
+                        raise
                     except Exception as e:
                         log.error(f"Ошибка чтения письма {uid} в {folder}: {e}")
+            except CONNECTION_ERRORS:
+                raise
             except Exception as e:
                 log.error(f"Ошибка обработки папки {folder}: {e}")
 
     except Exception as e:
         log.error(f"Ошибка IMAP подключения: {e}")
+        raise
     finally:
         if conn:
             try:

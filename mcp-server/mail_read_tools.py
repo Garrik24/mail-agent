@@ -12,10 +12,12 @@ import email
 import logging
 
 try:  # плоский импорт (так стартует сервис: python main.py из mcp-server/)
+    import mail_errors
     import mail_read
     from imap_utf7 import quote_folder, resolve_folder
     from mail_tools_patch import _imap_connection, validate_uids
 except ImportError:  # пакетный импорт
+    from . import mail_errors
     from . import mail_read
     from .imap_utf7 import quote_folder, resolve_folder
     from .mail_tools_patch import _imap_connection, validate_uids
@@ -67,7 +69,7 @@ def _get_attachment_text_impl(email_uid: str, folder: str = "INBOX",
         try:
             msg, _ = _fetch_message(imap, valid[0], folder)
         except ValueError as exc:
-            return {"ok": False, "reason": str(exc)}
+            return {"ok": False, "reason": mail_errors.describe(exc)}
 
     found = mail_read.find_attachment(msg, attachment_name)
     if not found:
@@ -153,7 +155,7 @@ def _read_messages_impl(email_uids, folder: str = "INBOX",
                                            include_attachment_text, ocr))
             except Exception as exc:
                 log.warning(f"read_messages: UID {uid} не прочитан: {exc}")
-                messages.append({"uid": uid, "error": str(exc)})
+                messages.append({"uid": uid, "error": mail_errors.describe(exc)})
 
     result = {"folder": folder, "count": len(messages), "messages": messages}
     if skipped:
@@ -192,7 +194,7 @@ def register_tools(mcp):
                                              attachment_name, max_chars, ocr)
         except Exception as exc:
             log.error(f"get_attachment_text: {exc}")
-            return {"ok": False, "reason": str(exc)}
+            return {"ok": False, "reason": mail_errors.describe(exc)}
 
     @mcp.tool()
     def read_messages(email_uids: list[str], folder: str = "INBOX",
@@ -223,7 +225,7 @@ def register_tools(mcp):
                                        include_attachment_text, ocr)
         except Exception as exc:
             log.error(f"read_messages: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     log.info("Зарегистрированы инструменты чтения: get_attachment_text, "
              "read_messages")

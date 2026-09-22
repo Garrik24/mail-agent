@@ -15,12 +15,14 @@ import logging
 import re
 
 try:  # плоский импорт (так стартует сервис: python main.py из mcp-server/)
+    import mail_errors
     import mail_read
     import mail_tools_patch
     from mail_read_tools import _fetch_message, _select
     from mail_tools_patch import (_imap_connection, _search_uids,
                                   build_criteria)
 except ImportError:  # пакетный импорт
+    from . import mail_errors
     from . import mail_read
     from . import mail_tools_patch
     from .mail_read_tools import _fetch_message, _select
@@ -457,6 +459,6 @@ def register_tools(mcp):
                                          max_scan, require_topic)
         except Exception as exc:
             log.error(f"find_approval_candidates: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     log.info("Зарегистрирован инструмент отбора: find_approval_candidates")
