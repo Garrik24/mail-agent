@@ -25,9 +25,11 @@ from datetime import datetime, timedelta
 from email.header import decode_header, make_header
 
 try:  # плоский импорт (так стартует сервис: python main.py из mcp-server/)
+    import mail_errors
     from imap_utf7 import (decode_mutf7, encode_mutf7, list_folders_raw,
                            quote_folder, resolve_folder)
 except ImportError:  # пакетный импорт
+    from . import mail_errors
     from .imap_utf7 import (decode_mutf7, encode_mutf7, list_folders_raw,
                             quote_folder, resolve_folder)
 
@@ -79,7 +81,7 @@ def _imap_connection():
             "Не найдены логин/пароль почты в переменных окружения "
             f"({'/'.join(_LOGIN_VARS)}, {'/'.join(_PASSWORD_VARS)})"
         )
-    imap = imaplib.IMAP4_SSL(host, port)
+    imap = imaplib.IMAP4_SSL(host, port, timeout=mail_errors.IMAP_TIMEOUT)
     try:
         imap.login(login, password)
         yield imap
@@ -547,7 +549,7 @@ def register_tools(mcp):
             return _list_folders_impl()
         except Exception as exc:
             log.error(f"list_folders: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     @mcp.tool()
     def create_folder(name: str) -> dict:
@@ -560,7 +562,7 @@ def register_tools(mcp):
             return _create_folder_impl(name)
         except Exception as exc:
             log.error(f"create_folder: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     @mcp.tool()
     def search_mail(keywords: list[str] | None = None, scope: str = "both",
@@ -601,7 +603,7 @@ def register_tools(mcp):
             )
         except Exception as exc:
             log.error(f"search_mail: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     @mcp.tool()
     def move_email(email_uid: str, target_folder: str,
@@ -617,7 +619,7 @@ def register_tools(mcp):
             return _move_impl([email_uid], target_folder, source_folder)
         except Exception as exc:
             log.error(f"move_email: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     @mcp.tool()
     def move_emails(email_uids: list[str], target_folder: str,
@@ -638,7 +640,7 @@ def register_tools(mcp):
                               expunge_fallback)
         except Exception as exc:
             log.error(f"move_emails: {exc}")
-            return {"error": str(exc)}
+            return {"error": mail_errors.describe(exc)}
 
     log.info("Зарегистрированы инструменты: list_folders, create_folder, "
              "search_mail, move_email, move_emails")

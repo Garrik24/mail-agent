@@ -8,6 +8,7 @@ import time
 import os
 from datetime import datetime, timezone, timedelta
 
+import health
 from imap_client import fetch_recent_emails
 from classifier import classify_email, EmailCategory
 from notifier import notify, send_telegram
@@ -126,21 +127,27 @@ def main():
     # Уведомление о запуске — только если его явно попросили
     maybe_notify_startup()
 
-    # Первый запуск сразу
-    try:
-        check_emails()
-    except Exception as e:
-        log.error(f"Ошибка первой проверки: {e}")
-
-    # Основной цикл
+    # Первый запуск сразу, дальше — каждые CHECK_INTERVAL секунд
+    run_check()
     while True:
         log.info(f"Следующая проверка через {CHECK_INTERVAL // 60} мин...")
         time.sleep(CHECK_INTERVAL)
-        try:
-            check_emails()
-        except Exception as e:
-            log.error(f"Ошибка проверки почты: {e}")
-            # Не падаем — ждём следующего цикла
+        run_check()
+
+
+def run_check():
+    """Одна проверка с учётом сбоев: не падаем, но и не молчим.
+
+    Неудача учитывается в health — после нескольких подряд владелец
+    получит предупреждение в Telegram, после восстановления — сообщение.
+    """
+    try:
+        check_emails()
+    except Exception as e:
+        log.error(f"Ошибка проверки почты: {e}")
+        health.record_failure(e)
+    else:
+        health.record_success(INITIAL_LOOKBACK_HOURS)
 
 
 if __name__ == "__main__":

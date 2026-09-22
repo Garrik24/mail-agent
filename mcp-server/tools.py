@@ -9,6 +9,7 @@ import os
 
 import attachment_storage
 import mail_attachments
+import mail_errors
 from imap_client import IMAPClient
 from mail_attachments import AttachmentError
 from sanitize import prepare_body
@@ -74,7 +75,8 @@ def register_tools(mcp):
                 return func(client, *args, **kwargs)
             except Exception as e:
                 log.error(f"Ошибка IMAP: {e}")
-                return json.dumps({"error": str(e)}, ensure_ascii=False)
+                return json.dumps({"error": mail_errors.describe(e)},
+                                  ensure_ascii=False)
             finally:
                 client.disconnect()
         return wrapper
@@ -600,7 +602,7 @@ def register_tools(mcp):
             except Exception as exc:
                 log.error(f"Ошибка IMAP при проверке вложений: {exc}")
                 return json.dumps(
-                    {"ok": False, "reason": f"Ошибка IMAP: {exc}"},
+                    {"ok": False, "reason": mail_errors.describe(exc)},
                     ensure_ascii=False, indent=2)
             finally:
                 client.disconnect()

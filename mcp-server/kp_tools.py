@@ -9,6 +9,7 @@
 import json
 import logging
 
+import mail_errors
 from imap_client import IMAPClient
 from sanitize import prepare_body
 from tools import _public_base_url
@@ -224,6 +225,7 @@ def register_tools(mcp):
             return json.dumps(result_send, ensure_ascii=False, indent=2)
         except Exception as e:
             log.error(f"Ошибка отправки КП: {e}")
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return json.dumps({"error": mail_errors.describe(e)},
+                              ensure_ascii=False)
         finally:
             client.disconnect()

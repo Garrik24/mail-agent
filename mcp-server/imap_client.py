@@ -23,6 +23,7 @@ from email.utils import parseaddr, formataddr, formatdate, getaddresses
 
 import attachment_storage
 import mail_attachments
+import mail_errors
 import mail_headers
 import mail_read
 from imap_utf7 import quote_folder, resolve_folder
@@ -334,7 +335,8 @@ class IMAPClient:
     def connect(self):
         """Подключиться к IMAP серверу."""
         log.info(f"Подключение к IMAP {IMAP_HOST}:{IMAP_PORT}")
-        self.conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        self.conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT,
+                                      timeout=mail_errors.IMAP_TIMEOUT)
         self.conn.login(MAIL_USER, MAIL_PASS)
         log.info("IMAP подключён")
 
