@@ -152,7 +152,8 @@ def test_apply_false_removes_headers():
     msg = EmailMessage()
     mail_headers.apply_send_options(msg, SENDER, True, True)
     options = mail_headers.apply_send_options(msg, SENDER, False, False)
-    assert options == {"read_receipt_requested": False, "urgent": False}
+    assert options["read_receipt_requested"] is False
+    assert options["urgent"] is False
     for header in (*RECEIPT, *mail_headers.URGENT_HEADERS):
         assert msg.get(header) is None
 
@@ -234,3 +235,38 @@ def test_send_kp_defaults_unchanged(box):
     assert result["read_receipt_requested"] is False
     assert result["urgent"] is False
     assert_no_receipt(sent_msg())
+
+
+# ------------------------------------------------ Message-ID
+
+@pytest.mark.parametrize("tool, kwargs", [
+    ("send_new_email", NEW),
+    ("send_reply", dict(email_uid="500", body="Ответ")),
+    ("forward_email", dict(email_uid="500", to="lawyer@example.ru")),
+    ("send_letter", dict(to="client@example.ru", **LETTER)),
+])
+def test_message_id_same_in_smtp_copy_and_result(box, tool, kwargs):
+    """Письмо, копия в «Отправленных» и ответ инструмента — один Message-ID."""
+    handlers, imap = box
+    result = json.loads(handlers[tool](**kwargs))
+    sent_id = sent_msg()["Message-ID"]
+    assert sent_id and sent_id.startswith("<") and sent_id.endswith("@mail.ru>")
+    copy = email.message_from_bytes(imap.appended[-1][1])
+    assert copy["Message-ID"] == sent_id
+    assert result["message_id"] == sent_id
+
+
+def test_message_ids_are_unique(box):
+    handlers, _ = box
+    handlers["send_new_email"](**NEW)
+    handlers["send_new_email"](**NEW)
+    assert sent_msg(0)["Message-ID"] != sent_msg(1)["Message-ID"]
+
+
+def test_existing_message_id_is_kept():
+    msg = EmailMessage()
+    msg["Message-ID"] = "<own@example.ru>"
+    for _ in range(2):
+        options = mail_headers.apply_send_options(msg, SENDER, True, True)
+    assert msg.get_all("Message-ID") == ["<own@example.ru>"]
+    assert options["message_id"] == "<own@example.ru>"
