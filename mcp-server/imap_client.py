@@ -19,9 +19,10 @@ from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
-from email.utils import parseaddr, formataddr, formatdate
+from email.utils import parseaddr, formataddr, formatdate, getaddresses
 
 import attachment_storage
+import mail_attachments
 import mail_read
 from imap_utf7 import quote_folder, resolve_folder
 
@@ -219,6 +220,79 @@ def attach_uploaded_files(msg: MIMEMultipart,
             f"({len(content)} байт, id={upload_id})"
         )
     return used
+
+
+def attach_email_files(msg: MIMEMultipart,
+                       items: list[dict] | None) -> list[dict]:
+    """Прикрепляет к msg вложения, скачанные из писем (mail_attachments).
+
+    Прикладывать последними: имя, совпавшее с уже приложенным файлом
+    (например, с PDF бланка), получает суффикс « (2)». Возвращает те же
+    элементы — с итоговыми именами.
+    """
+    if not items:
+        return []
+    taken = [mail_read.part_filename(p) for p in msg.walk()
+             if p.get_content_disposition() == "attachment"]
+    mail_attachments.dedupe_names(items, reserved=taken)
+    for item in items:
+        main_type, _, sub_type = item["mime"].partition("/")
+        if not main_type or not sub_type:
+            main_type, sub_type = "application", "octet-stream"
+        part = MIMEBase(main_type, sub_type)
+        part.set_payload(item["content"])
+        encoders.encode_base64(part)
+        part.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=("utf-8", "", item["filename"]),
+        )
+        msg.attach(part)
+    return items
+
+
+def attachments_total(msg: MIMEMultipart) -> int:
+    """Суммарный размер всех вложений письма (после декодирования)."""
+    return sum(len(p.get_payload(decode=True) or b"") for p in msg.walk()
+               if p.get_content_disposition() == "attachment")
+
+
+def split_recipients(to: str, cc: list[str] | None = None) -> list[str]:
+    """Адреса для SMTP по одному: "a@x.ru, b@y.ru" -> два адреса.
+
+    Строку с несколькими адресами smtplib отдаёт серверу одной командой
+    RCPT TO:<a@x.ru, b@y.ru>, и такой получатель невалиден.
+    """
+    pairs = getaddresses([to or ""] + list(cc or []))
+    return [addr for _, addr in pairs if addr]
+
+
+def email_attachments_error(items: list[dict] | None, recipients: list[str],
+                            msg: MIMEMultipart) -> dict | None:
+    """Серверные проверки вложений из писем перед SMTP.
+
+    None — можно отправлять; иначе ответ инструмента, письмо не уходит.
+    """
+    if not items:
+        return None
+    try:
+        mail_attachments.validate_outgoing(items, recipients,
+                                           attachments_total(msg))
+    except mail_attachments.AttachmentError as exc:
+        log.warning(f"Письмо не отправлено, вложения из писем: {exc}")
+        return {"error": f"Письмо не отправлено: {exc}", "sent": False}
+    return None
+
+
+def log_email_attachments(items: list[dict] | None,
+                          recipients: list[str]) -> None:
+    """Аудит в лог Railway: откуда файл и кому ушёл. Содержимое не пишется."""
+    for a in items or []:
+        log.info(
+            f"Вложение из письма отправлено: uid={a['uid']} "
+            f"folder={a['folder']} filename={a['filename']} "
+            f"size={a['size_bytes']} to={', '.join(recipients)}"
+        )
 
 
 def parse_email_message(msg: email.message.Message, uid: str = "") -> dict:
@@ -650,13 +724,15 @@ class IMAPClient:
                    reply_all: bool = False,
                    cc_override: list[str] | None = None,
                    attachments_json: str | None = None,
-                   attachment_ids_json: str | None = None) -> dict:
+                   attachment_ids_json: str | None = None,
+                   email_attachments: list[dict] | None = None) -> dict:
         """Ответить на письмо через SMTP.
 
         reply_all: если True — отвечает всем (To + CC оригинала)
         cc_override: если указан — используется вместо оригинальных CC
         attachments_json: JSON-список вложений с base64-содержимым.
         attachment_ids_json: JSON-список upload_id из chunked-upload.
+        email_attachments: вложения, скачанные из писем (mail_attachments).
 
         body ожидается в HTML (нормализуется в tools.send_reply).
         """
@@ -704,6 +780,12 @@ class IMAPClient:
 
         attached_files = attach_base64_files(msg, attachments_json)
         uploaded_ids = attach_uploaded_files(msg, attachment_ids_json)
+        attach_email_files(msg, email_attachments)
+
+        all_recipients = [reply_to] + cc_emails
+        blocked = email_attachments_error(email_attachments, all_recipients, msg)
+        if blocked:
+            return blocked
 
         try:
             log.info(f"SMTP подключение: {SMTP_HOST}:{SMTP_PORT}")
@@ -719,10 +801,10 @@ class IMAPClient:
             try:
                 smtp.login(MAIL_USER, MAIL_PASS)
                 log.info("SMTP авторизация успешна, отправка...")
-                all_recipients = [reply_to] + cc_emails
                 smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
             finally:
                 smtp.quit()
+            log_email_attachments(email_attachments, all_recipients)
 
             # Сохраняем в Отправленные
             self._save_to_sent(msg)
@@ -742,6 +824,9 @@ class IMAPClient:
                 result["attachments"] = attached_files
             if uploaded_ids:
                 result["uploaded_attachments"] = uploaded_ids
+            if email_attachments:
+                result["email_attachments"] = mail_attachments.attachments_plan(
+                    email_attachments)
             log.info(f"Ответ отправлен: to={reply_to}, cc={cc_emails}, тема: {subject}")
             return result
 
@@ -792,17 +877,19 @@ class IMAPClient:
                    cc: list[str] | None = None,
                    attachment_urls: list[str] | None = None,
                    attachments_json: str | None = None,
-                   attachment_ids_json: str | None = None) -> dict:
+                   attachment_ids_json: str | None = None,
+                   email_attachments: list[dict] | None = None) -> dict:
         """Отправить новое письмо.
 
         Args:
-            to: Email получателя
+            to: Email получателя (несколько — через запятую)
             subject: Тема письма
             body: Текст письма (HTML)
             cc: Список CC получателей
             attachment_urls: Список URL файлов для вложения
             attachments_json: JSON-список вложений с base64-содержимым
             attachment_ids_json: JSON-список upload_id из chunked-upload
+            email_attachments: вложения, скачанные из писем (mail_attachments)
         """
         signature = (
             '<br><br><div style="border-top:1px solid #ccc;padding-top:10px;margin-top:10px;">'
@@ -860,12 +947,16 @@ class IMAPClient:
         # Вложения из chunked-upload хранилища
         uploaded_ids = attach_uploaded_files(msg, attachment_ids_json)
 
+        # Вложения из писем в ящике — последними
+        attach_email_files(msg, email_attachments)
+
+        all_recipients = split_recipients(to, cc)
+        blocked = email_attachments_error(email_attachments, all_recipients, msg)
+        if blocked:
+            return blocked
+
         # Отправка через SMTP
         try:
-            all_recipients = [to]
-            if cc:
-                all_recipients.extend(cc)
-
             log.info(f"SMTP: отправка нового письма -> {to}, тема: {subject}")
             if SMTP_PORT == 465:
                 smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30)
@@ -880,6 +971,7 @@ class IMAPClient:
                 smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
             finally:
                 smtp.quit()
+            log_email_attachments(email_attachments, all_recipients)
 
             # Сохраняем в Отправленные
             self._save_to_sent(msg)
@@ -899,6 +991,9 @@ class IMAPClient:
                 result["attachments"] = downloaded_files
             if uploaded_ids:
                 result["uploaded_attachments"] = uploaded_ids
+            if email_attachments:
+                result["email_attachments"] = mail_attachments.attachments_plan(
+                    email_attachments)
             log.info(f"Письмо отправлено: to={to}, тема: {subject}")
             return result
 
@@ -909,7 +1004,8 @@ class IMAPClient:
     def send_letter_email(self, to: str, subject: str, html_body: str,
                           cc: list[str] | None = None,
                           pdf_bytes: bytes | None = None,
-                          pdf_filename: str = "Письмо.pdf") -> dict:
+                          pdf_filename: str = "Письмо.pdf",
+                          email_attachments: list[dict] | None = None) -> dict:
         """Отправить письмо с готовым PDF-вложением (официальный бланк).
 
         В отличие от send_email НЕ добавляет автоподпись и блок
@@ -918,12 +1014,14 @@ class IMAPClient:
         «Отправленные» переиспользуются из общей SMTP-логики.
 
         Args:
-            to: Email получателя
+            to: Email получателя (несколько — через запятую)
             subject: Тема письма
             html_body: HTML-тело письма-сопроводиловки (как есть, без автоподписи)
             cc: Список CC получателей
             pdf_bytes: Готовые байты PDF (None — отправить без вложения)
             pdf_filename: Имя файла вложения (поддерживается кириллица)
+            email_attachments: вложения из писем (mail_attachments) — идут
+                после PDF бланка в порядке списка
         """
         msg = MIMEMultipart("mixed")
         msg["From"] = formataddr(("ООО Ставропольгеодезия", MAIL_USER))
@@ -945,11 +1043,14 @@ class IMAPClient:
             )
             msg.attach(part)
 
-        try:
-            all_recipients = [to]
-            if cc:
-                all_recipients.extend(cc)
+        attach_email_files(msg, email_attachments)
 
+        all_recipients = split_recipients(to, cc)
+        blocked = email_attachments_error(email_attachments, all_recipients, msg)
+        if blocked:
+            return blocked
+
+        try:
             log.info(f"SMTP: отправка письма-бланка -> {to}, тема: {subject}")
             if SMTP_PORT == 465:
                 smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)
@@ -964,6 +1065,7 @@ class IMAPClient:
                 smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
             finally:
                 smtp.quit()
+            log_email_attachments(email_attachments, all_recipients)
 
             # Сохраняем в Отправленные
             self._save_to_sent(msg)
@@ -977,6 +1079,9 @@ class IMAPClient:
                 result["cc"] = cc
             if pdf_bytes:
                 result["attachment"] = pdf_filename
+            if email_attachments:
+                result["email_attachments"] = mail_attachments.attachments_plan(
+                    email_attachments)
             log.info(f"Письмо-бланк отправлено: to={to}, тема: {subject}")
             return result
 

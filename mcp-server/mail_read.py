@@ -20,7 +20,8 @@ from email.header import decode_header, make_header
 log = logging.getLogger(__name__)
 
 __all__ = ["decode_mime_header", "html_to_text", "split_quotes", "truncate",
-           "extract_body", "list_attachments", "parse_flags_list", "part_filename",
+           "extract_body", "attachment_parts", "list_attachments",
+           "parse_flags_list", "part_filename",
            "build_message_dict", "find_attachment", "extract_pdf_text",
            "extract_docx_text", "extract_attachment_text", "ocr_pdf",
            "ocr_available", "pdf_page_images", "render_pdf_pages",
@@ -237,17 +238,27 @@ def extract_body(msg: email.message.Message) -> dict:
     return {"text": "", "format": ""}
 
 
+def attachment_parts(msg: email.message.Message):
+    """Части-вложения письма вместе с разобранным именем: (part, filename).
+
+    Единый обход для list_attachments, find_attachment и вложений из писем
+    (mail_attachments): имя, которое показал get_email_body, находится
+    везде одинаково.
+    """
+    for part in msg.walk():
+        if part.is_multipart() or not _is_attachment(part):
+            continue
+        filename = part_filename(part)
+        if filename:
+            yield part, filename
+
+
 def list_attachments(msg: email.message.Message) -> list[dict]:
     """Вложения: имя, MIME-тип, размер в байтах. Содержимое не отдаётся."""
     attachments: list[dict] = []
     if not msg.is_multipart():
         return attachments
-    for part in msg.walk():
-        if part.is_multipart() or not _is_attachment(part):
-            continue
-        filename = part_filename(part)
-        if not filename:
-            continue
+    for part, filename in attachment_parts(msg):
         payload = part.get_payload(decode=True)
         attachments.append({
             "filename": filename,
@@ -321,12 +332,7 @@ def find_attachment(msg: email.message.Message, name: str = "") -> dict | None:
     (PDF или DOCX), иначе просто первое.
     """
     candidates = []
-    for part in msg.walk():
-        if part.is_multipart() or not _is_attachment(part):
-            continue
-        filename = part_filename(part)
-        if not filename:
-            continue
+    for part, filename in attachment_parts(msg):
         payload = part.get_payload(decode=True)
         candidates.append({
             "filename": filename,
