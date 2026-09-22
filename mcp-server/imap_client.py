@@ -23,6 +23,7 @@ from email.utils import parseaddr, formataddr, formatdate, getaddresses
 
 import attachment_storage
 import mail_attachments
+import mail_headers
 import mail_read
 from imap_utf7 import quote_folder, resolve_folder
 
@@ -615,14 +616,18 @@ class IMAPClient:
 
     def forward_email(self, email_uid: str, to: str,
                       comment: str = "",
-                      folder: str = "INBOX") -> dict:
+                      folder: str = "INBOX",
+                      read_receipt: bool = False,
+                      urgent: bool = False) -> dict:
         """Переслать письмо (с вложениями) на указанный email.
 
         Args:
             email_uid: UID оригинального письма
-            to: Email получателя
+            to: Email получателя (несколько — через запятую)
             comment: Комментарий перед пересланным телом (необязательно)
             folder: Папка с оригиналом
+            read_receipt: запросить уведомление о прочтении
+            urgent: отметить письмо как срочное
         """
         # 1. Забираем полное оригинальное письмо по UID.
         # Именно UID: по порядковому номеру можно молча взять чужое письмо
@@ -693,6 +698,9 @@ class IMAPClient:
             part["Content-Disposition"] = f'attachment; filename="{att["filename"]}"'
             msg.attach(part)
 
+        options = mail_headers.apply_send_options(msg, MAIL_USER,
+                                                  read_receipt, urgent)
+
         # 6. Отправляем
         try:
             log.info(f"SMTP: пересылка {fwd_subject} -> {to} ({len(attachments)} вложений)")
@@ -706,7 +714,7 @@ class IMAPClient:
                 smtp.ehlo()
             try:
                 smtp.login(MAIL_USER, MAIL_PASS)
-                smtp.sendmail(MAIL_USER, [to], msg.as_string())
+                smtp.sendmail(MAIL_USER, split_recipients(to), msg.as_string())
             finally:
                 smtp.quit()
 
@@ -720,6 +728,7 @@ class IMAPClient:
                 "subject": fwd_subject,
                 "attachments_count": len(attachments),
                 "attachments": [a["filename"] for a in attachments],
+                **options,
             }
 
         except Exception as e:
@@ -732,7 +741,9 @@ class IMAPClient:
                    cc_override: list[str] | None = None,
                    attachments_json: str | None = None,
                    attachment_ids_json: str | None = None,
-                   email_attachments: list[dict] | None = None) -> dict:
+                   email_attachments: list[dict] | None = None,
+                   read_receipt: bool = False,
+                   urgent: bool = False) -> dict:
         """Ответить на письмо через SMTP.
 
         reply_all: если True — отвечает всем (To + CC оригинала)
@@ -740,6 +751,7 @@ class IMAPClient:
         attachments_json: JSON-список вложений с base64-содержимым.
         attachment_ids_json: JSON-список upload_id из chunked-upload.
         email_attachments: вложения, скачанные из писем (mail_attachments).
+        read_receipt / urgent: уведомление о прочтении и отметка «срочно».
 
         body ожидается в HTML (нормализуется в tools.send_reply).
         """
@@ -793,6 +805,8 @@ class IMAPClient:
         blocked = outgoing_attachments_error(msg, all_recipients, email_attachments)
         if blocked:
             return blocked
+        options = mail_headers.apply_send_options(msg, MAIL_USER,
+                                                  read_receipt, urgent)
 
         try:
             log.info(f"SMTP подключение: {SMTP_HOST}:{SMTP_PORT}")
@@ -834,6 +848,7 @@ class IMAPClient:
             if email_attachments:
                 result["email_attachments"] = mail_attachments.attachments_plan(
                     email_attachments)
+            result.update(options)
             log.info(f"Ответ отправлен: to={reply_to}, cc={cc_emails}, тема: {subject}")
             return result
 
@@ -885,7 +900,9 @@ class IMAPClient:
                    attachment_urls: list[str] | None = None,
                    attachments_json: str | None = None,
                    attachment_ids_json: str | None = None,
-                   email_attachments: list[dict] | None = None) -> dict:
+                   email_attachments: list[dict] | None = None,
+                   read_receipt: bool = False,
+                   urgent: bool = False) -> dict:
         """Отправить новое письмо.
 
         Args:
@@ -897,6 +914,8 @@ class IMAPClient:
             attachments_json: JSON-список вложений с base64-содержимым
             attachment_ids_json: JSON-список upload_id из chunked-upload
             email_attachments: вложения, скачанные из писем (mail_attachments)
+            read_receipt: запросить уведомление о прочтении
+            urgent: отметить письмо как срочное
         """
         signature = (
             '<br><br><div style="border-top:1px solid #ccc;padding-top:10px;margin-top:10px;">'
@@ -961,6 +980,8 @@ class IMAPClient:
         blocked = outgoing_attachments_error(msg, all_recipients, email_attachments)
         if blocked:
             return blocked
+        options = mail_headers.apply_send_options(msg, MAIL_USER,
+                                                  read_receipt, urgent)
 
         # Отправка через SMTP
         try:
@@ -1001,6 +1022,7 @@ class IMAPClient:
             if email_attachments:
                 result["email_attachments"] = mail_attachments.attachments_plan(
                     email_attachments)
+            result.update(options)
             log.info(f"Письмо отправлено: to={to}, тема: {subject}")
             return result
 
@@ -1012,7 +1034,9 @@ class IMAPClient:
                           cc: list[str] | None = None,
                           pdf_bytes: bytes | None = None,
                           pdf_filename: str = "Письмо.pdf",
-                          email_attachments: list[dict] | None = None) -> dict:
+                          email_attachments: list[dict] | None = None,
+                          read_receipt: bool = False,
+                          urgent: bool = False) -> dict:
         """Отправить письмо с готовым PDF-вложением (официальный бланк).
 
         В отличие от send_email НЕ добавляет автоподпись и блок
@@ -1029,6 +1053,8 @@ class IMAPClient:
             pdf_filename: Имя файла вложения (поддерживается кириллица)
             email_attachments: вложения из писем (mail_attachments) — идут
                 после PDF бланка в порядке списка
+            read_receipt: запросить уведомление о прочтении
+            urgent: отметить письмо как срочное
         """
         msg = MIMEMultipart("mixed")
         msg["From"] = formataddr(("ООО Ставропольгеодезия", MAIL_USER))
@@ -1056,6 +1082,8 @@ class IMAPClient:
         blocked = outgoing_attachments_error(msg, all_recipients, email_attachments)
         if blocked:
             return blocked
+        options = mail_headers.apply_send_options(msg, MAIL_USER,
+                                                  read_receipt, urgent)
 
         try:
             log.info(f"SMTP: отправка письма-бланка -> {to}, тема: {subject}")
@@ -1089,6 +1117,7 @@ class IMAPClient:
             if email_attachments:
                 result["email_attachments"] = mail_attachments.attachments_plan(
                     email_attachments)
+            result.update(options)
             log.info(f"Письмо-бланк отправлено: to={to}, тема: {subject}")
             return result
 

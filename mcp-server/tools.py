@@ -258,7 +258,9 @@ def register_tools(mcp):
                    cc_override: str = "",
                    attachments: str = "",
                    attachment_ids: str = "",
-                   email_attachments: str = "") -> str:
+                   email_attachments: str = "",
+                   read_receipt: bool = False,
+                   urgent: bool = False) -> str:
         """Ответить на письмо. СНАЧАЛА вызови prepare_reply чтобы показать
         пользователю получателей и получить подтверждение.
 
@@ -292,6 +294,16 @@ def register_tools(mcp):
                 filename — все вложения письма, кроме картинок подписи.
                 Любая ошибка — письмо не отправляется. Все вложения
                 вместе — не больше 24 МБ.
+            read_receipt: запросить уведомление о прочтении (по умолчанию
+                false). Уведомление придёт на stavgeo26@mail.ru, когда
+                получатель откроет письмо и подтвердит отправку уведомления.
+                Получатель может отказаться — отсутствие уведомления не
+                доказывает, что письмо не прочитано. Gmail запрос не
+                показывает; в Mail.ru — только в веб-версии.
+            urgent: пометка «срочно» (по умолчанию false) — у получателя
+                красный «!» рядом с темой (Mail.ru, Outlook, Thunderbird,
+                The Bat!; Gmail не показывает). Ставь, только когда
+                пользователь явно просит «срочно» / «важно».
         """
         body = prepare_body(body)
         try:
@@ -315,6 +327,7 @@ def register_tools(mcp):
                 attachments_json=attachments or None,
                 attachment_ids_json=attachment_ids or None,
                 email_attachments=from_mail or None,
+                read_receipt=read_receipt, urgent=urgent,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -322,7 +335,9 @@ def register_tools(mcp):
     @mcp.tool()
     def forward_email(email_uid: str, to: str,
                       comment: str = "",
-                      folder: str = "INBOX") -> str:
+                      folder: str = "INBOX",
+                      read_receipt: bool = False,
+                      urgent: bool = False) -> str:
         """Переслать письмо (с вложениями) на указанный email-адрес.
         Пересылает полное письмо: тело + все вложения (PDF, DOC и т.д.).
 
@@ -334,12 +349,23 @@ def register_tools(mcp):
             to: Email получателя (например, ashirovna2012@gmail.com)
             comment: Комментарий перед пересланным письмом (необязательно)
             folder: Папка с оригиналом (по умолчанию INBOX)
+            read_receipt: запросить уведомление о прочтении (по умолчанию
+                false). Уведомление придёт на stavgeo26@mail.ru, когда
+                получатель откроет письмо и подтвердит отправку уведомления.
+                Получатель может отказаться — отсутствие уведомления не
+                доказывает, что письмо не прочитано. Gmail запрос не
+                показывает; в Mail.ru — только в веб-версии.
+            urgent: пометка «срочно» (по умолчанию false) — у получателя
+                красный «!» рядом с темой (Mail.ru, Outlook, Thunderbird,
+                The Bat!; Gmail не показывает). Ставь, только когда
+                пользователь явно просит «срочно» / «важно».
         """
         @_with_imap
         def _run(client: IMAPClient):
             result = client.forward_email(
                 email_uid=email_uid, to=to,
                 comment=comment, folder=folder,
+                read_receipt=read_receipt, urgent=urgent,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -350,7 +376,9 @@ def register_tools(mcp):
                        attachment_urls: str = "",
                        attachments: str = "",
                        attachment_ids: str = "",
-                       email_attachments: str = "") -> str:
+                       email_attachments: str = "",
+                       read_receipt: bool = False,
+                       urgent: bool = False) -> str:
         """Отправить новое письмо (не ответ, а самостоятельное).
         Подпись добавляется автоматически. Тело поддерживает HTML.
 
@@ -381,6 +409,16 @@ def register_tools(mcp):
                 filename — все вложения письма, кроме картинок подписи.
                 Любая ошибка — письмо не отправляется. Все вложения
                 вместе — не больше 24 МБ.
+            read_receipt: запросить уведомление о прочтении (по умолчанию
+                false). Уведомление придёт на stavgeo26@mail.ru, когда
+                получатель откроет письмо и подтвердит отправку уведомления.
+                Получатель может отказаться — отсутствие уведомления не
+                доказывает, что письмо не прочитано. Gmail запрос не
+                показывает; в Mail.ru — только в веб-версии.
+            urgent: пометка «срочно» (по умолчанию false) — у получателя
+                красный «!» рядом с темой (Mail.ru, Outlook, Thunderbird,
+                The Bat!; Gmail не показывает). Ставь, только когда
+                пользователь явно просит «срочно» / «важно».
         """
         body = prepare_body(body)
         try:
@@ -407,6 +445,7 @@ def register_tools(mcp):
                 attachments_json=attachments or None,
                 attachment_ids_json=attachment_ids or None,
                 email_attachments=from_mail or None,
+                read_receipt=read_receipt, urgent=urgent,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -484,6 +523,8 @@ def register_tools(mcp):
         executor: str = "Виктория",
         executor_phone: str = "8 (938) 350-74-00",
         email_attachments: str = "",
+        read_receipt: bool = True,
+        urgent: bool = False,
     ) -> str:
         """
         Собрать PDF письма на фирменном бланке ООО «Ставропольгеодезия» и вернуть
@@ -514,10 +555,13 @@ def register_tools(mcp):
             pdf_filename: имя файла (влияет на имя при открытии PDF).
             executor / executor_phone: исполнитель и телефон в подвале письма.
             email_attachments: вложения из писем (см. выше); пусто = без них.
+            read_receipt / urgent: те же галочки, что у send_letter; превью
+                ничего не отправляет, но показывает их в ответе — сообщи
+                пользователю, будет ли запрос о прочтении и пометка «срочно».
 
         Returns:
             JSON со ссылкой preview_url (открыть в браузере), сроком жизни,
-            размером PDF и attachments_plan. Ошибка проверки вложений —
+            размером PDF, attachments_plan и полями read_receipt / urgent. Ошибка проверки вложений —
             ok=false и reason, превью не собирается.
         """
         try:
@@ -569,6 +613,8 @@ def register_tools(mcp):
             "preview_url": url,
             "expires_in_min": preview_store.TTL_SECONDS // 60,
             "pdf_size_bytes": len(pdf),
+            "read_receipt": bool(read_receipt),
+            "urgent": bool(urgent),
             "hint": ("Покажи эту ссылку пользователю для проверки бланка "
                      "(текст, вёрстка, печать). После подтверждения вызови "
                      "send_letter с теми же контентными полями плюс to/cc."),
@@ -606,6 +652,8 @@ def register_tools(mcp):
         executor_phone: str = "8 (938) 350-74-00",
         attach_pdf: bool = True,
         email_attachments: str = "",
+        read_receipt: bool = True,
+        urgent: bool = False,
     ) -> str:
         """
         Собрать письмо на фирменном бланке ООО «Ставропольгеодезия» (с печатью и подписью)
@@ -646,6 +694,17 @@ def register_tools(mcp):
             executor / executor_phone: исполнитель и телефон в подвале письма.
             attach_pdf: прикладывать ли собранный PDF (по умолчанию да).
             email_attachments: вложения из писем (см. выше); пусто = без них.
+            read_receipt: запросить уведомление о прочтении (по умолчанию
+                true — официальные письма на бланке всегда с запросом).
+                Уведомление придёт на stavgeo26@mail.ru, когда получатель
+                откроет письмо и подтвердит отправку уведомления. Получатель
+                может отказаться — отсутствие уведомления не доказывает, что
+                письмо не прочитано. Gmail запрос не показывает; в Mail.ru —
+                только в веб-версии.
+            urgent: пометка «срочно» (по умолчанию false) — у получателя
+                красный «!» рядом с темой (Mail.ru, Outlook, Thunderbird,
+                The Bat!; Gmail не показывает). Ставь, только когда
+                пользователь явно просит «срочно» / «важно».
 
         Returns:
             JSON-строка с результатом отправки.
@@ -701,6 +760,7 @@ def register_tools(mcp):
                 to=to, subject=subject, html_body=email_body, cc=cc_list,
                 pdf_bytes=(pdf if attach_pdf else None), pdf_filename=pdf_filename,
                 email_attachments=from_mail or None,
+                read_receipt=read_receipt, urgent=urgent,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
