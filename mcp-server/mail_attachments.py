@@ -6,17 +6,20 @@
 через чат и chunked-загрузку.
 
 Любая ошибка поиска или проверки — AttachmentError, и письмо при этом не
-отправляется: частичная отправка запрещена. Проверки (офисные форматы наружу,
-лимит размера) выполняет сервер, а не ассистент.
+отправляется: частичная отправка запрещена. Проверки выполняет сервер, а не
+ассистент: лимит размера — для писем с вложениями из ящика, запрет офисных
+форматов наружу — для всех вложений исходящего письма (check_office).
 """
 
 import email
+import io
 import json
 import logging
 import mimetypes
 import os
 import re
 import unicodedata
+import zipfile
 
 import mail_read
 
@@ -184,9 +187,40 @@ def internal_emails() -> set[str]:
     return {e.strip().lower() for e in emails if "@" in e}
 
 
+OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # .doc, .xls, .ppt
+# Каталоги внутри zip, по которым узнаются DOCX / XLSX / PPTX
+OOXML_DIRS = ("word/", "xl/", "ppt/")
+
+
+def _office_by_content(content: bytes) -> bool:
+    """Офисный документ по содержимому — на случай переименованного файла.
+
+    Обычный zip-архив с документами внутри офисным не считается:
+    проверяется структура самого файла, а не то, что в нём лежит.
+    """
+    if not content:
+        return False
+    if content.startswith(OLE2_MAGIC) or content[:64].lstrip()[:5] == b"{\\rtf":
+        return True
+    if not content.startswith(b"PK\x03\x04"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = archive.namelist()
+            if any(n.startswith(OOXML_DIRS) for n in names):
+                return True
+            return ("mimetype" in names and archive.read("mimetype").startswith(
+                b"application/vnd.oasis.opendocument.text"))
+    except Exception:
+        return False
+
+
 def is_office_file(item: dict) -> bool:
+    """Офисный файл по расширению, MIME или содержимому (если оно есть)."""
     ext = os.path.splitext(item["filename"].strip())[1].lower()
-    return ext in OFFICE_EXT or item.get("mime", "").lower() in OFFICE_MIME
+    if ext in OFFICE_EXT or item.get("mime", "").lower() in OFFICE_MIME:
+        return True
+    return _office_by_content(item.get("content") or b"")
 
 
 def check_total_size(total_bytes: int) -> None:
@@ -196,14 +230,12 @@ def check_total_size(total_bytes: int) -> None:
             f"превышает лимит {MAX_TOTAL_BYTES / 1048576:.0f} МБ на письмо")
 
 
-def validate_outgoing(items: list[dict], recipients: list[str],
-                      total_bytes: int) -> None:
-    """Проверки перед SMTP. Любое нарушение — исключение, письмо не уходит.
+def check_office(items: list[dict], recipients: list[str]) -> None:
+    """Офисные файлы — только на внутренние адреса, иначе исключение.
 
-    total_bytes — все вложения письма целиком, включая PDF бланка и файлы,
-    приложенные другими способами.
+    items — все вложения письма ({filename, mime, content}), каким бы
+    способом они ни были приложены.
     """
-    check_total_size(total_bytes)
     internal = internal_emails()
     external = [r for r in recipients if r.strip().lower() not in internal]
     blocked = [a["filename"] for a in items if is_office_file(a)]

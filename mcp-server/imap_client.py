@@ -251,10 +251,12 @@ def attach_email_files(msg: MIMEMultipart,
     return items
 
 
-def attachments_total(msg: MIMEMultipart) -> int:
-    """Суммарный размер всех вложений письма (после декодирования)."""
-    return sum(len(p.get_payload(decode=True) or b"") for p in msg.walk()
-               if p.get_content_disposition() == "attachment")
+def message_attachments(msg: MIMEMultipart) -> list[dict]:
+    """Все вложения собранного письма: {filename, mime, content}."""
+    return [{"filename": mail_read.part_filename(p),
+             "mime": p.get_content_type(),
+             "content": p.get_payload(decode=True) or b""}
+            for p in msg.walk() if p.get_content_disposition() == "attachment"]
 
 
 def split_recipients(to: str, cc: list[str] | None = None) -> list[str]:
@@ -267,19 +269,24 @@ def split_recipients(to: str, cc: list[str] | None = None) -> list[str]:
     return [addr for _, addr in pairs if addr]
 
 
-def email_attachments_error(items: list[dict] | None, recipients: list[str],
-                            msg: MIMEMultipart) -> dict | None:
-    """Серверные проверки вложений из писем перед SMTP.
+def outgoing_attachments_error(msg: MIMEMultipart, recipients: list[str],
+                               email_attachments: list[dict] | None = None
+                               ) -> dict | None:
+    """Серверные проверки вложений перед SMTP.
 
+    Офисные форматы на внешние адреса запрещены для любых вложений — из
+    писем, base64, chunked-загрузки и по ссылке. Лимит 24 МБ проверяется,
+    когда в письме есть вложения из ящика.
     None — можно отправлять; иначе ответ инструмента, письмо не уходит.
     """
-    if not items:
-        return None
+    files = message_attachments(msg)
     try:
-        mail_attachments.validate_outgoing(items, recipients,
-                                           attachments_total(msg))
+        if email_attachments:
+            mail_attachments.check_total_size(
+                sum(len(f["content"]) for f in files))
+        mail_attachments.check_office(files, recipients)
     except mail_attachments.AttachmentError as exc:
-        log.warning(f"Письмо не отправлено, вложения из писем: {exc}")
+        log.warning(f"Письмо не отправлено, вложения: {exc}")
         return {"error": f"Письмо не отправлено: {exc}", "sent": False}
     return None
 
@@ -783,7 +790,7 @@ class IMAPClient:
         attach_email_files(msg, email_attachments)
 
         all_recipients = [reply_to] + cc_emails
-        blocked = email_attachments_error(email_attachments, all_recipients, msg)
+        blocked = outgoing_attachments_error(msg, all_recipients, email_attachments)
         if blocked:
             return blocked
 
@@ -951,7 +958,7 @@ class IMAPClient:
         attach_email_files(msg, email_attachments)
 
         all_recipients = split_recipients(to, cc)
-        blocked = email_attachments_error(email_attachments, all_recipients, msg)
+        blocked = outgoing_attachments_error(msg, all_recipients, email_attachments)
         if blocked:
             return blocked
 
@@ -1046,7 +1053,7 @@ class IMAPClient:
         attach_email_files(msg, email_attachments)
 
         all_recipients = split_recipients(to, cc)
-        blocked = email_attachments_error(email_attachments, all_recipients, msg)
+        blocked = outgoing_attachments_error(msg, all_recipients, email_attachments)
         if blocked:
             return blocked
 

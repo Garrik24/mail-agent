@@ -393,18 +393,18 @@ def test_internal_list_by_full_address(monkeypatch):
     docx = [{"filename": "a.docx", "mime": "", "size_bytes": 1}]
     for ok in ("stavgeo26@mail.ru", "business_mail.24@mail.ru",
                "buh@example.ru", "STAVGEO26@MAIL.RU"):
-        mail_attachments.validate_outgoing(docx, [ok], 1)
+        mail_attachments.check_office(docx, [ok])
     with pytest.raises(AttachmentError):
-        mail_attachments.validate_outgoing(docx, ["other@mail.ru"], 1)
+        mail_attachments.check_office(docx, ["other@mail.ru"])
 
 
 def test_office_detected_by_mime_without_extension():
     item = {"filename": "Договор", "size_bytes": 1,
             "mime": "application/msword"}
     with pytest.raises(AttachmentError, match="офисные"):
-        mail_attachments.validate_outgoing([item], ["a@example.ru"], 1)
+        mail_attachments.check_office([item], ["a@example.ru"])
     pdf = {"filename": "Договор.pdf", "size_bytes": 1, "mime": "application/pdf"}
-    mail_attachments.validate_outgoing([pdf], ["a@example.ru"], 1)
+    mail_attachments.check_office([pdf], ["a@example.ru"])
 
 
 # --------------------------------------------------------- 6. дубли имён
@@ -639,3 +639,146 @@ def test_audit_log_has_source_and_recipient_but_no_content(mailbox, caplog):
                  f"size={len(b'%PDF-1.4 invoice')}", "to=client@example.ru"):
         assert part in line
     assert "%PDF" not in line
+
+
+# ------------------------------- офисные форматы для всех способов вложения
+
+def _zip(entries: dict) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        for name, data in entries.items():
+            archive.writestr(name, data)
+    return buf.getvalue()
+
+
+DOCX_BYTES = _zip({"[Content_Types].xml": "<Types/>",
+                   "word/document.xml": "<w:document/>"})
+XLSX_BYTES = _zip({"[Content_Types].xml": "<Types/>",
+                   "xl/workbook.xml": "<workbook/>"})
+ODT_BYTES = _zip({"mimetype": "application/vnd.oasis.opendocument.text",
+                  "content.xml": "<office:document-content/>"})
+OLE2_BYTES = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64
+RTF_BYTES = b"{\\rtf1\\ansi Contract}"
+
+
+@pytest.mark.parametrize("content", [DOCX_BYTES, XLSX_BYTES, ODT_BYTES,
+                                     OLE2_BYTES, RTF_BYTES])
+def test_renamed_office_file_detected_by_content(content):
+    item = {"filename": "report.bin", "mime": "application/octet-stream",
+            "content": content}
+    assert mail_attachments.is_office_file(item)
+
+
+@pytest.mark.parametrize("content", [
+    b"%PDF-1.4 invoice",
+    _zip({"Договор.docx": DOCX_BYTES}),  # архив с документом — не документ
+    b"PK\x03\x04broken zip",
+    b"",
+])
+def test_non_office_content_passes(content):
+    item = {"filename": "file.bin", "mime": "application/octet-stream",
+            "content": content}
+    assert not mail_attachments.is_office_file(item)
+
+
+def b64_attachments(*files) -> str:
+    return json.dumps([{"filename": name, "mime_type": mime,
+                        "content_base64": base64.b64encode(data).decode()}
+                       for name, data, mime in files], ensure_ascii=False)
+
+
+def test_base64_docx_to_external_blocked(mailbox):
+    handlers, _ = mailbox
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="Договор", body="Добрый день",
+        attachments=b64_attachments(
+            ("Смета.pdf", b"%PDF-smeta", "application/pdf"),
+            ("Договор.docx", DOCX_BYTES,
+             "application/vnd.openxmlformats-officedocument."
+             "wordprocessingml.document"))))
+    assert result["sent"] is False
+    # в ошибке только офисный файл, PDF к нему претензий нет
+    assert "Договор.docx" in result["error"]
+    assert "Смета.pdf" not in result["error"]
+    assert FakeSMTP.sent == []
+
+
+def test_base64_docx_to_internal_passes(mailbox):
+    handlers, _ = mailbox
+    result = json.loads(handlers["send_new_email"](
+        to="business_mail.24@mail.ru", subject="Договор", body="Добрый день",
+        attachments=b64_attachments(("Договор.docx", DOCX_BYTES,
+                                     "application/octet-stream"))))
+    assert result["status"] == "sent"
+    assert sent_attachments() == ["Договор.docx"]
+
+
+def test_docx_renamed_to_pdf_is_blocked(mailbox):
+    handlers, _ = mailbox
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="Смета", body="Добрый день",
+        attachments=b64_attachments(("Смета.pdf", DOCX_BYTES,
+                                     "application/pdf"))))
+    assert result["sent"] is False
+    assert FakeSMTP.sent == []
+
+
+def test_uploaded_xlsx_to_external_blocked_and_kept(mailbox, monkeypatch,
+                                                    tmp_path):
+    import attachment_storage
+    handlers, _ = mailbox
+    monkeypatch.setattr(attachment_storage, "UPLOAD_DIR", tmp_path)
+    upload = attachment_storage.start_upload("Расчёт.xlsx",
+                                             "application/octet-stream")
+    upload_id = upload["upload_id"]
+    attachment_storage.append_chunk(upload_id,
+                                    base64.b64encode(XLSX_BYTES).decode())
+    assert attachment_storage.finish_upload(upload_id)["status"] == "ready"
+
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="Расчёт", body="Добрый день",
+        attachment_ids=json.dumps([upload_id])))
+    assert result["sent"] is False
+    assert "Расчёт.xlsx" in result["error"]
+    assert FakeSMTP.sent == []
+    # загрузка не пропала: можно отправить на внутренний адрес
+    assert attachment_storage.read_attachment(upload_id)[0] == XLSX_BYTES
+
+    result = json.loads(handlers["send_new_email"](
+        to="stavgeo26@mail.ru", subject="Расчёт", body="Добрый день",
+        attachment_ids=json.dumps([upload_id])))
+    assert result["status"] == "sent"
+
+
+def test_url_doc_to_external_blocked(mailbox, monkeypatch):
+    handlers, _ = mailbox
+    monkeypatch.setattr(IMAPClient, "_download_attachment", lambda self, url: {
+        "filename": "download", "data": OLE2_BYTES,
+        "content_type": "application/octet-stream"})
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="Документ", body="Добрый день",
+        attachment_urls="https://disk.yandex.ru/d/abc"))
+    assert result["sent"] is False
+    assert "download" in result["error"]
+    assert FakeSMTP.sent == []
+
+
+def test_send_reply_base64_xlsx_to_external_blocked(mailbox):
+    handlers, _ = mailbox
+    result = json.loads(handlers["send_reply"](
+        email_uid="500", body="Расчёт во вложении",
+        attachments=b64_attachments(("Расчёт.xlsx", XLSX_BYTES,
+                                     "application/octet-stream"))))
+    assert result["sent"] is False
+    assert "buh@example.ru" in result["error"]
+    assert FakeSMTP.sent == []
+
+
+def test_letter_pdf_to_external_still_goes(mailbox):
+    handlers, _ = mailbox
+    result = json.loads(handlers["send_letter"](to="client@example.ru",
+                                                **LETTER))
+    assert result["status"] == "sent"
+    assert sent_attachments() == ["Письмо.pdf"]
