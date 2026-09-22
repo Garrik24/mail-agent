@@ -140,6 +140,8 @@ def register_tools(mcp):
         works_table: str = "",
         payment_terms: str = "",
         validity: str = "",
+        read_receipt: bool = False,
+        urgent: bool = False,
     ) -> str:
         """
         Собрать PDF коммерческого предложения (КП) на сервере и отправить
@@ -176,6 +178,11 @@ def register_tools(mcp):
             works_table: JSON-список строк таблицы работ (опционально).
             payment_terms: порядок оплаты. Пусто = стандарт компании.
             validity: срок действия КП (опционально).
+            read_receipt: запросить уведомление о прочтении (по умолчанию
+                false). Уведомление придёт на stavgeo26@mail.ru, если
+                получатель подтвердит; отказ ничего не доказывает.
+            urgent: пометка «срочно» (по умолчанию false) — красный «!» у
+                получателя. Только когда пользователь явно просит.
 
         Returns:
             JSON-строка с результатом отправки.
@@ -211,6 +218,7 @@ def register_tools(mcp):
             result_send = client.send_letter_email(
                 to=to, subject=subject, html_body=email_body,
                 pdf_bytes=pdf, pdf_filename=pdf_filename,
+                read_receipt=read_receipt, urgent=urgent,
             )
             result_send["pdf_size_bytes"] = len(pdf)
             return json.dumps(result_send, ensure_ascii=False, indent=2)
