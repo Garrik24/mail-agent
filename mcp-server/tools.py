@@ -8,10 +8,19 @@ import smtplib
 import os
 
 import attachment_storage
+import mail_attachments
 from imap_client import IMAPClient
+from mail_attachments import AttachmentError
 from sanitize import prepare_body
 
 log = logging.getLogger(__name__)
+
+
+def _not_sent(exc: Exception) -> str:
+    """Ответ отправки, когда вложения из писем не собрались: письмо не ушло."""
+    log.warning(f"Письмо не отправлено, вложения из писем: {exc}")
+    return json.dumps({"error": f"Письмо не отправлено: {exc}", "sent": False},
+                      ensure_ascii=False, indent=2)
 
 
 def _public_base_url() -> str:
@@ -248,7 +257,8 @@ def register_tools(mcp):
                    reply_all: bool = False,
                    cc_override: str = "",
                    attachments: str = "",
-                   attachment_ids: str = "") -> str:
+                   attachment_ids: str = "",
+                   email_attachments: str = "") -> str:
         """Ответить на письмо. СНАЧАЛА вызови prepare_reply чтобы показать
         пользователю получателей и получить подтверждение.
 
@@ -271,11 +281,28 @@ def register_tools(mcp):
                             размера вместо передачи полного base64 в attachments
                             (который ограничен размером tool call).
                             Файлы удаляются после отправки.
+            email_attachments: JSON-список вложений из существующих писем
+                [{"uid": "...", "folder": "...", "filename": "..."}] —
+                файл берётся сервером прямо из письма в ящике. UID и точное
+                имя файла брать из search_mail / get_email_body. Пустой
+                filename — все вложения письма, кроме картинок подписи.
+                Любая ошибка — письмо не отправляется. Офисные файлы
+                (.docx, .xlsx и т.п.) — только на внутренние адреса;
+                все вложения вместе — не больше 24 МБ.
         """
         body = prepare_body(body)
+        try:
+            spec = mail_attachments.parse_spec(email_attachments)
+        except AttachmentError as exc:
+            return _not_sent(exc)
 
         @_with_imap
         def _run(client: IMAPClient):
+            try:
+                from_mail = mail_attachments.collect_email_attachments(
+                    client, spec)
+            except AttachmentError as exc:
+                return _not_sent(exc)
             cc_list = None
             if cc_override.strip():
                 cc_list = [e.strip() for e in cc_override.split(",") if e.strip()]
@@ -284,6 +311,7 @@ def register_tools(mcp):
                 reply_all=reply_all, cc_override=cc_list,
                 attachments_json=attachments or None,
                 attachment_ids_json=attachment_ids or None,
+                email_attachments=from_mail or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -318,12 +346,14 @@ def register_tools(mcp):
                        cc: str = "",
                        attachment_urls: str = "",
                        attachments: str = "",
-                       attachment_ids: str = "") -> str:
+                       attachment_ids: str = "",
+                       email_attachments: str = "") -> str:
         """Отправить новое письмо (не ответ, а самостоятельное).
         Подпись добавляется автоматически. Тело поддерживает HTML.
 
         Args:
-            to: Email получателя (например, client@example.com)
+            to: Email получателя (например, client@example.com); несколько —
+                через запятую
             subject: Тема письма
             body: Текст письма. HTML разметка поддерживается; обычный текст
                   с переносами строк тоже — сервер разобьёт его на абзацы.
@@ -337,11 +367,28 @@ def register_tools(mcp):
                             размера вместо передачи полного base64 в attachments
                             (который ограничен размером tool call).
                             Файлы удаляются после отправки.
+            email_attachments: JSON-список вложений из существующих писем
+                [{"uid": "...", "folder": "...", "filename": "..."}] —
+                файл берётся сервером прямо из письма в ящике. UID и точное
+                имя файла брать из search_mail / get_email_body. Пустой
+                filename — все вложения письма, кроме картинок подписи.
+                Любая ошибка — письмо не отправляется. Офисные файлы
+                (.docx, .xlsx и т.п.) — только на внутренние адреса;
+                все вложения вместе — не больше 24 МБ.
         """
         body = prepare_body(body)
+        try:
+            spec = mail_attachments.parse_spec(email_attachments)
+        except AttachmentError as exc:
+            return _not_sent(exc)
 
         @_with_imap
         def _run(client: IMAPClient):
+            try:
+                from_mail = mail_attachments.collect_email_attachments(
+                    client, spec)
+            except AttachmentError as exc:
+                return _not_sent(exc)
             cc_list = None
             if cc.strip():
                 cc_list = [e.strip() for e in cc.split(",") if e.strip()]
@@ -353,6 +400,7 @@ def register_tools(mcp):
                 cc=cc_list, attachment_urls=urls_list,
                 attachments_json=attachments or None,
                 attachment_ids_json=attachment_ids or None,
+                email_attachments=from_mail or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
@@ -426,6 +474,7 @@ def register_tools(mcp):
         pdf_filename: str = "Письмо.pdf",
         executor: str = "Виктория",
         executor_phone: str = "8 (938) 350-74-00",
+        email_attachments: str = "",
     ) -> str:
         """
         Собрать PDF письма на фирменном бланке ООО «Ставропольгеодезия» и вернуть
@@ -435,6 +484,14 @@ def register_tools(mcp):
 
         Параметры — те же контентные поля, что у send_letter (без to/cc/email_body):
         тот же текст даст тот же PDF. Ссылка действует ~60 минут.
+
+        email_attachments: JSON-список вложений из существующих писем
+        [{"uid": "...", "folder": "...", "filename": "..."}]. UID и точное имя
+        файла брать из search_mail / get_email_body. Пустой filename — все
+        вложения письма, кроме картинок подписи. Любая ошибка — письмо не
+        отправляется. В preview_letter файлы не прикладываются, но проверяются:
+        возвращается attachments_plan — показать его пользователю вместе со
+        ссылкой. Строку «Приложение:» в бланке формируй сам через appendix.
 
         Args:
             subject: тема письма (она же — заголовок по центру в самом письме).
@@ -447,10 +504,19 @@ def register_tools(mcp):
             appendix: текст после слова "Приложение:". Пусто = блок не выводится.
             pdf_filename: имя файла (влияет на имя при открытии PDF).
             executor / executor_phone: исполнитель и телефон в подвале письма.
+            email_attachments: вложения из писем (см. выше); пусто = без них.
 
         Returns:
-            JSON со ссылкой preview_url (открыть в браузере), сроком жизни и размером PDF.
+            JSON со ссылкой preview_url (открыть в браузере), сроком жизни,
+            размером PDF и attachments_plan. Ошибка проверки вложений —
+            ok=false и reason, превью не собирается.
         """
+        try:
+            spec = mail_attachments.parse_spec(email_attachments)
+        except AttachmentError as exc:
+            return json.dumps({"ok": False, "reason": str(exc)},
+                              ensure_ascii=False, indent=2)
+
         try:
             pdf = _render_letter_pdf(
                 body=body, addressee=addressee, isx_number=isx_number,
@@ -464,17 +530,54 @@ def register_tools(mcp):
                 {"error": f"Не удалось собрать PDF: {e}"}, ensure_ascii=False,
             )
 
+        # Вложения из писем проверяются так же, как при отправке, но не
+        # прикладываются: превью показывает только бланк.
+        from_mail = []
+        if spec:
+            client = IMAPClient()
+            try:
+                client.connect()
+                from_mail = mail_attachments.collect_email_attachments(
+                    client, spec, reserved_names=[pdf_filename])
+                mail_attachments.check_total_size(
+                    len(pdf) + sum(a["size_bytes"] for a in from_mail))
+            except AttachmentError as exc:
+                return json.dumps({"ok": False, "reason": str(exc)},
+                                  ensure_ascii=False, indent=2)
+            except Exception as exc:
+                log.error(f"Ошибка IMAP при проверке вложений: {exc}")
+                return json.dumps(
+                    {"ok": False, "reason": f"Ошибка IMAP: {exc}"},
+                    ensure_ascii=False, indent=2)
+            finally:
+                client.disconnect()
+
         import preview_store
         token = preview_store.save_preview(pdf, pdf_filename)
         url = f"{_public_base_url()}/preview/{token}.pdf"
-        return json.dumps({
+        result = {
+            "ok": True,
             "preview_url": url,
             "expires_in_min": preview_store.TTL_SECONDS // 60,
             "pdf_size_bytes": len(pdf),
             "hint": ("Покажи эту ссылку пользователю для проверки бланка "
                      "(текст, вёрстка, печать). После подтверждения вызови "
                      "send_letter с теми же контентными полями плюс to/cc."),
-        }, ensure_ascii=False, indent=2)
+        }
+        if from_mail:
+            result["attachments_plan"] = mail_attachments.attachments_plan(
+                from_mail)
+            result["total_size_bytes"] = len(pdf) + sum(
+                a["size_bytes"] for a in from_mail)
+            warnings = mail_attachments.office_warnings(from_mail)
+            if warnings:
+                result["warnings"] = warnings
+            result["hint"] = (
+                "Покажи пользователю ссылку и список attachments_plan — эти "
+                "файлы уйдут после PDF бланка. После подтверждения вызови "
+                "send_letter с теми же контентными полями, тем же "
+                "email_attachments плюс to/cc.")
+        return json.dumps(result, ensure_ascii=False, indent=2)
 
     @mcp.tool()
     def send_letter(
@@ -493,6 +596,7 @@ def register_tools(mcp):
         executor: str = "Виктория",
         executor_phone: str = "8 (938) 350-74-00",
         attach_pdf: bool = True,
+        email_attachments: str = "",
     ) -> str:
         """
         Собрать письмо на фирменном бланке ООО «Ставропольгеодезия» (с печатью и подписью)
@@ -501,6 +605,16 @@ def register_tools(mcp):
         ВАЖНО: перед отправкой сначала вызови preview_letter с теми же контентными
         полями, покажи пользователю ссылку и дождись подтверждения, что вёрстка,
         текст и положение печати корректны. send_letter вызывай только после «да».
+
+        email_attachments: JSON-список вложений из существующих писем
+        [{"uid": "...", "folder": "...", "filename": "..."}]. UID и точное имя
+        файла брать из search_mail / get_email_body. Пустой filename — все
+        вложения письма, кроме картинок подписи. Любая ошибка — письмо не
+        отправляется. В preview_letter возвращается attachments_plan — показать
+        его пользователю вместе со ссылкой. Порядок вложений: сначала PDF
+        бланка, затем эти файлы в порядке списка. Офисные файлы (.docx, .xlsx,
+        .doc, .xls, .pptx, .rtf, .odt) уходят только на внутренние адреса; все
+        вложения письма вместе — не больше 24 МБ.
 
         Args:
             to: email получателя (несколько — через запятую).
@@ -522,11 +636,16 @@ def register_tools(mcp):
             pdf_filename: имя файла вложения.
             executor / executor_phone: исполнитель и телефон в подвале письма.
             attach_pdf: прикладывать ли собранный PDF (по умолчанию да).
+            email_attachments: вложения из писем (см. выше); пусто = без них.
 
         Returns:
             JSON-строка с результатом отправки.
         """
         email_body = prepare_body(email_body)
+        try:
+            spec = mail_attachments.parse_spec(email_attachments)
+        except AttachmentError as exc:
+            return _not_sent(exc)
 
         # --- рендер PDF (общий с preview_letter) ---
         try:
@@ -561,9 +680,18 @@ def register_tools(mcp):
 
         @_with_imap
         def _run(client: IMAPClient):
+            # Все файлы из писем собираются ДО отправки: не нашёлся хоть
+            # один — письмо не уходит вовсе.
+            try:
+                from_mail = mail_attachments.collect_email_attachments(
+                    client, spec,
+                    reserved_names=[pdf_filename] if attach_pdf else [])
+            except AttachmentError as exc:
+                return _not_sent(exc)
             result = client.send_letter_email(
                 to=to, subject=subject, html_body=email_body, cc=cc_list,
                 pdf_bytes=(pdf if attach_pdf else None), pdf_filename=pdf_filename,
+                email_attachments=from_mail or None,
             )
             return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
