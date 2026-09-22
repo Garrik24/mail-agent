@@ -12,7 +12,13 @@ Exchange). Получатель может отказаться отправля
 «Срочно»: X-Priority (Mail.ru, The Bat!, Thunderbird) и Importance из
 RFC 2156 (Outlook/Exchange). X-MSMail-Priority не ставим намеренно: без
 X-MimeOLE он добавляет баллы в SpamAssassin (правило MISSING_MIMEOLE).
+
+Message-ID присваивается здесь же. Без него SMTP Mail.ru выдаёт письму
+свой идентификатор, а копия в «Отправленных» остаётся без него: ответы и
+уведомления о прочтении ссылаются на ID, которого в копии нет.
 """
+
+from email.utils import make_msgid
 
 RECEIPT_HEADERS = (
     "Disposition-Notification-To",
@@ -50,12 +56,21 @@ def apply_urgent(msg, enabled: bool):
     return msg
 
 
+def ensure_message_id(msg, sender_email: str) -> str:
+    """Присвоить Message-ID, если его ещё нет; вернуть итоговый."""
+    if not msg["Message-ID"]:
+        domain = sender_email.rpartition("@")[2] or None
+        msg["Message-ID"] = make_msgid(domain=domain)
+    return msg["Message-ID"]
+
+
 def apply_send_options(msg, sender_email: str, read_receipt: bool = False,
                        urgent: bool = False) -> dict:
-    """Проставить обе галочки и вернуть поля для ответа инструмента."""
+    """Проставить обе галочки и Message-ID; вернуть поля для ответа."""
     apply_read_receipt(msg, sender_email, read_receipt)
     apply_urgent(msg, urgent)
     return {
+        "message_id": ensure_message_id(msg, sender_email),
         "read_receipt_requested": bool(read_receipt and sender_email),
         "urgent": bool(urgent),
     }
