@@ -42,6 +42,9 @@ register_mail_triage_tools(mcp)
 from kp_tools import register_tools as register_kp_tools
 register_kp_tools(mcp)
 
+from html_pdf_tools import register_tools as register_html_pdf_tools
+register_html_pdf_tools(mcp)
+
 
 async def health_response(scope, receive, send):
     """Минимальный ASGI ответ для /health."""
