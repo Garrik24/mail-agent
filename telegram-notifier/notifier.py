@@ -10,6 +10,8 @@ from datetime import datetime, timezone, timedelta
 import anthropic
 import httpx
 
+import gemini_fallback
+
 log = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -26,19 +28,26 @@ CATEGORY_LABELS = {
 }
 
 
+def _claude_outage(exc: Exception) -> bool:
+    """Claude недоступен как сервис (баланс, блокировка организации, ключ, лимиты, сбои)."""
+    if isinstance(exc, anthropic.APIConnectionError):
+        return True
+    if isinstance(exc, anthropic.APIStatusError):
+        return gemini_fallback.is_outage(exc.status_code, str(exc))
+    return False
+
+
 def analyze_with_claude(email_data: dict) -> dict:
     """
-    Отправляет письмо Claude для анализа.
+    Отправляет письмо Claude для анализа; если Claude недоступен — Gemini.
     Возвращает: {"summary": "...", "action": "...", "urgency": "..."}
     """
-    if not ANTHROPIC_API_KEY:
+    if not ANTHROPIC_API_KEY and not gemini_fallback.enabled():
         return {
             "summary": email_data.get("subject", ""),
             "action": "Проверить письмо",
             "urgency": "средняя",
         }
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     prompt = f"""Проанализируй деловое письмо и верни ТОЛЬКО JSON без markdown-блоков.
 
@@ -58,12 +67,24 @@ def analyze_with_claude(email_data: dict) -> dict:
 }}"""
 
     try:
-        message = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text.strip()
+        raw = None
+        if ANTHROPIC_API_KEY:
+            try:
+                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                message = client.messages.create(
+                    model="claude-sonnet-5",
+                    max_tokens=512,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                # Первым блоком может прийти размышление — берём только текст.
+                raw = "".join(b.text for b in message.content if b.type == "text").strip()
+            except Exception as e:
+                # Запасной канал — только при сбое самого сервиса Anthropic.
+                if not (gemini_fallback.enabled() and _claude_outage(e)):
+                    raise
+                log.warning(f"Claude недоступен ({str(e)[:150]}) — письмо анализирует Gemini")
+        if raw is None:
+            raw = gemini_fallback.generate("", prompt, max_tokens=512, json_mode=True).strip()
         # Убираем markdown-обёртку если есть
         if raw.startswith("```"):
             raw = raw.split("```")[1]
