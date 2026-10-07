@@ -286,7 +286,7 @@ def outgoing_attachments_error(msg: MIMEMultipart, recipients: list[str],
         if email_attachments:
             mail_attachments.check_total_size(
                 sum(len(f["content"]) for f in files))
-        mail_attachments.check_office(files, recipients, from_email_attachments=False)
+        mail_attachments.check_office(files, recipients, from_email_attachments=bool(email_attachments))
     except mail_attachments.AttachmentError as exc:
         log.warning(f"Письмо не отправлено, вложения: {exc}")
         return {"error": f"Письмо не отправлено: {exc}", "sent": False}

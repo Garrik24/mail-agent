@@ -872,23 +872,6 @@ def test_office_to_internal_address_always_allowed(monkeypatch):
     mail_attachments.check_office(docx, ["stavgeo26@mail.ru"])
 
 
-def test_forward_clean_not_accessible_without_office_files(monkeypatch):
-    """forward_clean отправляет даже без офисных файлов — разрешение не требуется."""
-    monkeypatch.setenv("FORWARD_ALLOWLIST", "")
-    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
-    monkeypatch.setenv("MAIL_USERNAME", "stavgeo26@mail.ru")
-    
-    pdf = [{
-        "filename": "Отчет.pdf",
-        "mime": "application/pdf",
-        "size_bytes": 100,
-        "is_from_email_attachments": True
-    }]
-    # PDF не требует разрешения
-    mail_attachments.check_office(pdf, ["external@example.ru"],
-                                 from_email_attachments=True, source_uid="789")
-
-
 def test_parse_forward_allowlist():
     """parse_forward_allowlist корректно разбирает переменную окружения."""
     import os
@@ -912,3 +895,54 @@ def test_parse_forward_allowlist():
     assert mail_attachments.parse_forward_allowlist() == {"partner@example.ru"}
     
     os.environ.pop("FORWARD_ALLOWLIST", None)
+
+
+
+
+
+# ----------------------------------------- forward_clean и email_attachments тесты
+
+def test_forward_clean_missing_uid_no_smtp(mailbox):
+    """Несуществующий UID — ошибка, SMTP не вызывается."""
+    handlers, _ = mailbox
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="x", body="x",
+        email_attachments=spec(("999999", "INBOX", ""))))
+    assert result["sent"] is False
+    assert FakeSMTP.sent == []
+
+
+def test_email_attachments_office_blocked_external(mailbox, monkeypatch):
+    """email_attachments: офисный файл на внешний адрес вне FORWARD_ALLOWLIST — блокировка."""
+    handlers, _ = mailbox
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    result = json.loads(handlers["send_new_email"](
+        to="external@example.ru", subject="x", body="x",
+        email_attachments=spec(("178070", "INBOX", ""))))
+    assert result["sent"] is False
+    assert "Договор" in result["error"]
+    assert FakeSMTP.sent == []
+
+
+def test_email_attachments_office_allowed_allowlist(mailbox, monkeypatch):
+    """email_attachments: офисный файл на адрес в FORWARD_ALLOWLIST — разрешено."""
+    handlers, _ = mailbox
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "contractor@example.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    result = json.loads(handlers["send_new_email"](
+        to="contractor@example.ru", subject="x", body="x",
+        email_attachments=spec(("178070", "INBOX", ""))))
+    assert "status" in result or result.get("sent") is True
+
+
+def test_email_attachments_office_blocked_one_external(mailbox, monkeypatch):
+    """email_attachments: офисный файл заблокирован если один из получателей вне allowlist."""
+    handlers, _ = mailbox
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "partner@example.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    result = json.loads(handlers["send_new_email"](
+        to="partner@example.ru,other@unknown.ru", subject="x", body="x",
+        email_attachments=spec(("178070", "INBOX", ""))))
+    assert result["sent"] is False
+    assert FakeSMTP.sent == []

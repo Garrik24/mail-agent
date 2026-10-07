@@ -217,7 +217,7 @@ def _office_by_content(content: bytes) -> bool:
     """
     if not content:
         return False
-    if content.startswith(OLE2_MAGIC) or content[:64].lstrip()[:5] == b"{\\\rtf":
+    if content.startswith(OLE2_MAGIC) or content[:64].lstrip()[:5] == b"{\\rtf":
         return True
     if not content.startswith(b"PK\x03\x04"):
         return False
