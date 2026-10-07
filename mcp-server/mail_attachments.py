@@ -9,6 +9,10 @@
 отправляется: частичная отправка запрещена. Проверки выполняет сервер, а не
 ассистент: лимит размера — для писем с вложениями из ящика, запрет офисных
 форматов наружу — для всех вложений исходящего письма (check_office).
+
+FORWARD_ALLOWLIST: переменная окружения со списком адресов через запятую.
+Если задана, офисные файлы из входящих писем (email_attachments) разрешены
+на эти адреса, при условии что ВСЕ получатели (to и cc) есть в списке.
 """
 
 import email
@@ -187,6 +191,19 @@ def internal_emails() -> set[str]:
     return {e.strip().lower() for e in emails if "@" in e}
 
 
+def parse_forward_allowlist() -> set[str]:
+    """Белый список адресов для пересылки офисных файлов из входящих писем.
+    
+    Читает FORWARD_ALLOWLIST из переменной окружения: адреса через запятую.
+    Сравнение без учёта регистра и пробелов. Пустой результат = доверенных
+    адресов нет, офисные файлы блокируются как обычно.
+    """
+    raw = os.environ.get("FORWARD_ALLOWLIST", "").strip()
+    if not raw:
+        return set()
+    return {e.strip().lower() for e in raw.split(",") if e.strip() and "@" in e}
+
+
 OLE2_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # .doc, .xls, .ppt
 # Каталоги внутри zip, по которым узнаются DOCX / XLSX / PPTX
 OOXML_DIRS = ("word/", "xl/", "ppt/")
@@ -200,7 +217,7 @@ def _office_by_content(content: bytes) -> bool:
     """
     if not content:
         return False
-    if content.startswith(OLE2_MAGIC) or content[:64].lstrip()[:5] == b"{\\rtf":
+    if content.startswith(OLE2_MAGIC) or content[:64].lstrip()[:5] == b"{\\\rtf":
         return True
     if not content.startswith(b"PK\x03\x04"):
         return False
@@ -230,20 +247,54 @@ def check_total_size(total_bytes: int) -> None:
             f"превышает лимит {MAX_TOTAL_BYTES / 1048576:.0f} МБ на письмо")
 
 
-def check_office(items: list[dict], recipients: list[str]) -> None:
-    """Офисные файлы — только на внутренние адреса, иначе исключение.
-
-    items — все вложения письма ({filename, mime, content}), каким бы
-    способом они ни были приложены.
+def check_office(items: list[dict], recipients: list[str],
+                 from_email_attachments: bool = False,
+                 source_uid: str = "") -> None:
+    """Проверка офисных файлов при отправке письма.
+    
+    Офисные файлы (.docx, .doc, .xlsx, .xls, .pptx, .rtf, .odt) блокируются
+    на внешние адреса, если одновременно выполнены оба условия:
+    1. Файл взят из входящего письма (from_email_attachments=True)
+    2. ВСЕ получатели (to и cc) есть в FORWARD_ALLOWLIST
+    
+    Во всех остальных случаях (assembly-generated, base64, attachment_ids,
+    или хотя бы один получатель вне списка) файл блокируется.
+    
+    Args:
+        items: все вложения письма ({filename, mime, content}), каким бы
+               способом они ни были приложены.
+        recipients: список email адресов (to, cc, иногда bcc)
+        from_email_attachments: True если вложения из email_attachments
+        source_uid: UID исходного письма (для логирования)
     """
     internal = internal_emails()
-    external = [r for r in recipients if r.strip().lower() not in internal]
+    allowlist = parse_forward_allowlist()
+    
+    # Нормализуем получателей
+    norm_recipients = {r.strip().lower() for r in recipients if r.strip()}
+    external = norm_recipients - internal
     blocked = [a["filename"] for a in items if is_office_file(a)]
-    if external and blocked:
-        raise AttachmentError(
-            "офисные файлы нельзя отправлять на внешние адреса: "
-            f"{', '.join(blocked)} -> {', '.join(external)}. "
-            "Приложи PDF-версию или отправь только на внутренние адреса")
+    
+    if not blocked or not external:
+        # Либо офисных нет, либо все получатели внутренние
+        return
+    
+    # Есть офисные файлы и внешние адреса. Проверяем разрешение.
+    if from_email_attachments and allowlist:
+        # Разрешено, только если ВСЕ получатели в allowlist
+        if external <= allowlist:
+            # Логируем разрешённую отправку
+            log.info(
+                f"Офисные файлы из входящего письма разрешены на доверенные адреса: "
+                f"uid={source_uid}, files={', '.join(blocked)}, recipients={', '.join(external)}"
+            )
+            return
+    
+    # Блокируем
+    raise AttachmentError(
+        "офисные файлы нельзя отправлять на внешние адреса: "
+        f"{', '.join(blocked)} -> {', '.join(external)}. "
+        "Приложи PDF-версию или отправь только на внутренние адреса")
 
 
 def office_warnings(items: list[dict]) -> list[str]:
@@ -262,6 +313,8 @@ def collect_email_attachments(client, spec: list[dict],
     client — IMAPClient: письмо читается его fetch_raw_message (BODY.PEEK[],
     письмо остаётся непрочитанным), папка — тем же резолвером, что у
     search_mail и get_email_body. Ошибка по любому элементу — исключение.
+    
+    Все вложения помечаются is_from_email_attachments=True для check_office.
     """
     messages = {}
     result = []
@@ -280,7 +333,8 @@ def collect_email_attachments(client, spec: list[dict],
             # fetch_raw_message: письма нет, UID кривой, папка не открылась
             raise AttachmentError(str(exc)) from None
         for item in items:
-            item.update(uid=uid, folder=folder, source=source)
+            item.update(uid=uid, folder=folder, source=source,
+                       is_from_email_attachments=True)
             result.append(item)
 
     check_total_size(sum(a["size_bytes"] for a in result))
@@ -291,3 +345,4 @@ def attachments_plan(items: list[dict]) -> list[dict]:
     """Что будет приложено — без содержимого, для превью и ответа отправки."""
     return [{"filename": a["filename"], "size_bytes": a["size_bytes"],
              "mime": a["mime"], "source": a["source"]} for a in items]
+

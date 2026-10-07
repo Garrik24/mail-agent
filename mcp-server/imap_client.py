@@ -286,7 +286,7 @@ def outgoing_attachments_error(msg: MIMEMultipart, recipients: list[str],
         if email_attachments:
             mail_attachments.check_total_size(
                 sum(len(f["content"]) for f in files))
-        mail_attachments.check_office(files, recipients)
+        mail_attachments.check_office(files, recipients, from_email_attachments=False)
     except mail_attachments.AttachmentError as exc:
         log.warning(f"Письмо не отправлено, вложения: {exc}")
         return {"error": f"Письмо не отправлено: {exc}", "sent": False}
@@ -1126,3 +1126,130 @@ class IMAPClient:
         except Exception as e:
             log.error(f"Ошибка отправки письма-бланка: {e}")
             return {"error": str(e)}
+
+    def forward_clean(self, email_uid: str, to: str, subject: str, body: str,
+                      folder: str = "INBOX", cc: str | None = None,
+                      wanted_filenames: list[str] | None = None,
+                      read_receipt: bool = False,
+                      urgent: bool = False) -> dict:
+        """Переслать письмо чистым: без заголовков исходного отправителя.
+        
+        Извлекает вложения из исходного письма, отправляет новое письмо
+        от нашего ящика с вашим текстом и стандартной подписью.
+        К офисным файлам применяется проверка FORWARD_ALLOWLIST.
+        """
+        try:
+            raw, _ = self.fetch_raw_message(email_uid, folder)
+            msg_source = email.message_from_bytes(raw)
+            
+            # Извлеку нужные вложения
+            attachments = []
+            try:
+                for part, filename in mail_read.attachment_parts(msg_source):
+                    # Пропускаю встроенные картинки подписи
+                    if (part.get_content_maintype() == "image" and
+                        (part.get("Content-ID") or
+                         filename.lower().startswith(("image", "mailru")))):
+                        continue
+                    
+                    # Фильтрую по указанным именам, если они даны
+                    if wanted_filenames is not None:
+                        if filename not in wanted_filenames:
+                            continue
+                    
+                    content = part.get_payload(decode=True) or b""
+                    if content:
+                        attachments.append({
+                            "filename": filename,
+                            "content": content,
+                            "mime": part.get_content_type(),
+                            "size_bytes": len(content),
+                            "uid": email_uid,
+                            "folder": folder,
+                            "is_from_email_attachments": True,
+                        })
+            except Exception as e:
+                return {"error": f"Не удалось извлечь вложения: {e}",
+                       "sent": False}
+            
+            # Проверю размер
+            total_size = sum(a.get("size_bytes", 0) for a in attachments)
+            if total_size > 24 * 1024 * 1024:
+                return {"error": f"Размер вложений {total_size / 1048576:.1f} МБ > 24 МБ",
+                       "sent": False}
+            
+            # Проверю office files
+            try:
+                recipients = [r.strip() for r in ([to] + (cc.split(",") if cc else []))
+                             if r.strip()]
+                mail_attachments.check_office(
+                    attachments, recipients,
+                    from_email_attachments=True,
+                    source_uid=email_uid
+                )
+            except mail_attachments.AttachmentError as e:
+                return {"error": str(e), "sent": False}
+            
+            # Создам новое письмо
+            msg = MIMEMultipart("mixed")
+            msg["From"] = formataddr(("ООО Ставропольгеодезия", MAIL_USER))
+            msg["To"] = to
+            msg["Subject"] = subject
+            msg["Date"] = formatdate(localtime=True)
+            if cc:
+                msg["Cc"] = cc
+            
+            msg.attach(MIMEText(body, "html", "utf-8"))
+            
+            # Добавлю вложения
+            for att in attachments:
+                main_type, _, sub_type = att["mime"].partition("/")
+                if not sub_type:
+                    main_type, sub_type = "application", "octet-stream"
+                part = MIMEBase(main_type, sub_type)
+                part.set_payload(att["content"])
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", "attachment",
+                              filename=("utf-8", "", att["filename"]))
+                msg.attach(part)
+            
+            # Добавлю подпись
+            self._add_signature(msg)
+            
+            # Применю опции
+            mail_headers.apply_send_options(msg, MAIL_USER, read_receipt, urgent)
+            
+            # Отправлю через SMTP
+            all_recipients = split_recipients(to, [cc] if cc else None)
+            
+            log.info(f"SMTP forward_clean: uid={email_uid} -> {to}, тема: {subject}")
+            if SMTP_PORT == 465:
+                smtp = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=60)
+                smtp.ehlo()
+            else:
+                smtp = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60)
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.ehlo()
+            try:
+                smtp.login(MAIL_USER, MAIL_PASS)
+                smtp.sendmail(MAIL_USER, all_recipients, msg.as_string())
+            finally:
+                smtp.quit()
+            
+            # Сохраню в Отправленные
+            self._save_to_sent(msg)
+            
+            return {
+                "sent": True,
+                "message": "Письмо отправлено",
+                "to": to,
+                "subject": subject,
+                "source_uid": email_uid,
+                "attachments_count": len(attachments),
+            }
+        
+        except Exception as e:
+            log.error(f"Ошибка forward_clean: {e}")
+            return {"error": str(e), "sent": False}
+
