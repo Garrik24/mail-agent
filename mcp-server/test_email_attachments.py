@@ -946,3 +946,63 @@ def test_email_attachments_office_blocked_one_external(mailbox, monkeypatch):
         email_attachments=spec(("178070", "INBOX", ""))))
     assert result["sent"] is False
     assert FakeSMTP.sent == []
+
+
+def test_mixed_attachments_base64_office_blocked(mailbox, monkeypatch):
+    """Смешанные вложения: base64 офисный файл блокируется, даже если email_attachments разрешен."""
+    handlers, _ = mailbox
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "contractor@example.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    
+    # base64 DOCX + email_attachments DOCX на адрес в allowlist
+    b64 = [{"filename": "contract.docx", "mime_type": "application/msword",
+            "content_base64": base64.b64encode(b"PK\x03\x04docx").decode()}]
+    result = json.loads(handlers["send_new_email"](
+        to="contractor@example.ru", subject="x", body="x",
+        attachments=json.dumps(b64, ensure_ascii=False),
+        email_attachments=spec(("178070", "INBOX", ""))))
+    # Должна быть ошибка: base64 офисный файл всегда блокируется
+    assert result["sent"] is False
+    assert "contract.docx" in result["error"] or "офисные" in result["error"]
+    assert FakeSMTP.sent == []
+
+
+def test_forward_clean_preserves_attachment_bytes(mailbox):
+    """forward_clean: sha256 вложения совпадает (файл передается байт в байт)."""
+    handlers, imap = mailbox
+    # Отправлю письмо с email_attachments
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="Счёт", body="Счёт отправляю",
+        email_attachments=spec(("179012", BUH, INVOICE))))
+    
+    assert result.get("status") == "sent" or result.get("sent") is True
+    
+    # Проверю что вложение в отправленном письме совпадает байт в байт
+    sent_msg = email.message_from_string(FakeSMTP.sent[-1][2])
+    for part, filename in mail_read.attachment_parts(sent_msg):
+        if filename == INVOICE:
+            sent_content = part.get_payload(decode=True)
+            original_content = b"%PDF-1.4 invoice"
+            # SHA256 должен совпадать
+            import hashlib
+            assert hashlib.sha256(sent_content).hexdigest() == hashlib.sha256(original_content).hexdigest()
+            break
+
+
+def test_forward_clean_inline_images_filtered(mailbox):
+    """forward_clean: inline-картинки с Content-ID не прикладываются при пустом filenames."""
+    handlers, imap = mailbox
+    # BUH письмо содержит inline-картинки подписи (см. SIGNATURE_IMAGES)
+    result = json.loads(handlers["send_new_email"](
+        to="client@example.ru", subject="Счёт", body="Счёт",
+        email_attachments=spec(("179012", BUH, ""))))  # пусто = все вложения кроме картинок
+    
+    assert result.get("status") == "sent" or result.get("sent") is True
+    
+    sent_msg = email.message_from_string(FakeSMTP.sent[-1][2])
+    attachments = [name for part, name in mail_read.attachment_parts(sent_msg)]
+    
+    # PDF счёт должен быть, картинки подписи не должны быть
+    assert INVOICE in attachments
+    assert "image001.png" not in attachments
+    assert "mailrusigimg" not in " ".join(attachments)

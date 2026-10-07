@@ -230,7 +230,7 @@ def attach_email_files(msg: MIMEMultipart,
 
     Прикладывать последними: имя, совпавшее с уже приложенным файлом
     (например, с PDF бланка), получает суффикс « (2)». Возвращает те же
-    элементы — с итоговыми именами.
+    элементы — с итоговыми именами. Помечает части флагом _from_email_attachments.
     """
     if not items:
         return []
@@ -249,15 +249,17 @@ def attach_email_files(msg: MIMEMultipart,
             "attachment",
             filename=("utf-8", "", item["filename"]),
         )
+        part._from_email_attachments = True  # Помечаю флагом
         msg.attach(part)
     return items
 
 
 def message_attachments(msg: MIMEMultipart) -> list[dict]:
-    """Все вложения собранного письма: {filename, mime, content}."""
+    """Все вложения собранного письма: {filename, mime, content, is_from_email_attachments}."""
     return [{"filename": mail_read.part_filename(p),
              "mime": p.get_content_type(),
-             "content": p.get_payload(decode=True) or b""}
+             "content": p.get_payload(decode=True) or b"",
+             "is_from_email_attachments": bool(getattr(p, "_from_email_attachments", False))}
             for p in msg.walk() if p.get_content_disposition() == "attachment"]
 
 
@@ -286,7 +288,15 @@ def outgoing_attachments_error(msg: MIMEMultipart, recipients: list[str],
         if email_attachments:
             mail_attachments.check_total_size(
                 sum(len(f["content"]) for f in files))
-        mail_attachments.check_office(files, recipients, from_email_attachments=bool(email_attachments))
+        # Разделю файлы по источникам и проверю каждую группу
+        from_email = [f for f in files if f.get("is_from_email_attachments")]
+        not_from_email = [f for f in files if not f.get("is_from_email_attachments")]
+        if not_from_email:
+            mail_attachments.check_office(not_from_email, recipients, from_email_attachments=False)
+        if from_email:
+            # Для email_attachments всех файлов один UID (из первого файла)
+            source_uid = from_email[0].get("uid", "") if from_email else ""
+            mail_attachments.check_office(from_email, recipients, from_email_attachments=True, source_uid=source_uid)
     except mail_attachments.AttachmentError as exc:
         log.warning(f"Письмо не отправлено, вложения: {exc}")
         return {"error": f"Письмо не отправлено: {exc}", "sent": False}
