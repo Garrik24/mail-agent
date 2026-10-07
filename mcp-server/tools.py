@@ -269,8 +269,9 @@ def register_tools(mcp):
         Письмо сохраняется в папку Отправленные автоматически.
 
         Офисные файлы (.docx, .doc, .xlsx, .xls, .pptx, .rtf, .odt) — в любом
-        виде вложений — сервер отправит только на внутренние адреса; внешним
-        адресатам прикладывай PDF, иначе письмо не уйдёт.
+        виде вложений — сервер отправит только на внутренние адреса и на адреса
+        из FORWARD_ALLOWLIST, если вложения взяты из email_attachments.
+        Для остальных внешних адресатов прикладывай PDF, иначе письмо не уйдёт.
 
         Args:
             email_uid: UID письма, на которое отвечаем
@@ -385,8 +386,9 @@ def register_tools(mcp):
         Подпись добавляется автоматически. Тело поддерживает HTML.
 
         Офисные файлы (.docx, .doc, .xlsx, .xls, .pptx, .rtf, .odt) — в любом
-        виде вложений — сервер отправит только на внутренние адреса; внешним
-        адресатам прикладывай PDF, иначе письмо не уйдёт.
+        виде вложений — сервер отправит только на внутренние адреса и на адреса
+        из FORWARD_ALLOWLIST, если вложения взяты из email_attachments.
+        Для остальных внешних адресатов прикладывай PDF, иначе письмо не уйдёт.
 
         Args:
             to: Email получателя (например, client@example.com); несколько —
@@ -777,6 +779,66 @@ def register_tools(mcp):
                 {"count": len(folders), "folders": folders},
                 ensure_ascii=False, indent=2,
             )
+        return _run()
+
+
+    @mcp.tool()
+    def forward_clean(email_uid: str, to: str,
+                      subject: str, body: str,
+                      folder: str = "INBOX",
+                      cc: str = "",
+                      filenames: str = "",
+                      read_receipt: bool = False,
+                      urgent: bool = False) -> str:
+        """Переслать письмо чистым образом: без данных исходного отправителя.
+        
+        Читает исходное письмо по UID, извлекает указанные вложения байт в байт,
+        отправляет НОВОЕ письмо от нашего ящика с вашим текстом и стандартной
+        подписью. В письмо НЕ включаются: заголовки исходного письма, его текст,
+        цитата, блок "От / Кому / Дата", подпись отправителя, его адреса и
+        телефоны, заголовки In-Reply-To/References.
+        
+        Копия сохраняется в Отправленные. К офисным файлам применяется правило
+        FORWARD_ALLOWLIST: разрешены только на адреса из списка доверенных.
+        
+        Args:
+            email_uid: UID исходного письма (только цифры)
+            to: Email получателя (один адрес, обязательный)
+            subject: Тема нового письма (обязательная)
+            body: Текст письма. Обычный текст с переносами или HTML.
+            folder: Папка исходного письма (по умолчанию INBOX)
+            cc: Email адреса в копию через запятую (необязательно)
+            filenames: JSON-список точных имён вложений вида ["file.pdf", "doc.docx"].
+                       Пустой список или пустая строка = все вложения, кроме
+                       встроенных картинок подписи (inline/Content-ID).
+                       Любое имя не найдено — письмо не отправляется.
+            read_receipt: запросить уведомление о прочтении (по умолчанию false)
+            urgent: пометка "срочно" (по умолчанию false)
+        """
+        body = prepare_body(body)
+        
+        # Разберу список имён файлов
+        wanted_filenames = []
+        if filenames and filenames.strip():
+            try:
+                wanted_filenames = json.loads(filenames)
+                if not isinstance(wanted_filenames, list):
+                    wanted_filenames = []
+            except json.JSONDecodeError:
+                return json.dumps(
+                    {"error": f"filenames должен быть JSON-списком: {filenames}",
+                     "sent": False},
+                    ensure_ascii=False, indent=2)
+
+        @_with_imap
+        def _run(client: IMAPClient):
+            result = client.forward_clean(
+                email_uid=email_uid, to=to, subject=subject, body=body,
+                folder=folder, cc=cc or None,
+                wanted_filenames=wanted_filenames or None,
+                read_receipt=read_receipt, urgent=urgent,
+            )
+            return json.dumps(result, ensure_ascii=False, indent=2)
         return _run()
 
     @mcp.tool()

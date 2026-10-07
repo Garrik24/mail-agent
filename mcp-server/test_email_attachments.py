@@ -782,3 +782,133 @@ def test_letter_pdf_to_external_still_goes(mailbox):
                                                 **LETTER))
     assert result["status"] == "sent"
     assert sent_attachments() == ["Письмо.pdf"]
+
+
+# ------------------------------------------- 10. FORWARD_ALLOWLIST
+
+def test_office_from_email_attachments_allowed_to_allowlist(monkeypatch):
+    """Офисный файл из email_attachments разрешен, если получатель в FORWARD_ALLOWLIST."""
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "partner@example.ru, trusted@corp.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    monkeypatch.setenv("MAIL_USERNAME", "stavgeo26@mail.ru")
+    
+    docx = [{
+        "filename": "Договор.docx",
+        "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "size_bytes": 100,
+        "is_from_email_attachments": True,
+        "uid": "123",
+        "folder": "INBOX"
+    }]
+    # Должно пройти без ошибки
+    mail_attachments.check_office(docx, ["partner@example.ru"],
+                                 from_email_attachments=True, source_uid="123")
+
+
+def test_office_from_email_attachments_blocked_if_recipient_not_in_allowlist(monkeypatch):
+    """Офисный файл блокирован, если получатель не в FORWARD_ALLOWLIST."""
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "partner@example.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    monkeypatch.setenv("MAIL_USERNAME", "stavgeo26@mail.ru")
+    
+    docx = [{
+        "filename": "Договор.docx",
+        "mime": "application/msword",
+        "size_bytes": 100,
+        "is_from_email_attachments": True
+    }]
+    with pytest.raises(AttachmentError, match="офисные файлы"):
+        mail_attachments.check_office(docx, ["stranger@example.ru"],
+                                     from_email_attachments=True, source_uid="123")
+
+
+def test_office_from_email_attachments_blocked_if_one_recipient_not_in_allowlist(monkeypatch):
+    """Блокировка если хотя бы один получатель вне списка."""
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "partner@example.ru, trusted@corp.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    
+    docx = [{
+        "filename": "Предложение.xlsx",
+        "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "size_bytes": 100,
+        "is_from_email_attachments": True
+    }]
+    # Один получатель в списке, второй нет
+    with pytest.raises(AttachmentError, match="офисные файлы"):
+        mail_attachments.check_office(docx, ["partner@example.ru", "other@unknown.ru"],
+                                     from_email_attachments=True, source_uid="456")
+
+
+def test_office_base64_blocked_even_to_allowlist_address(monkeypatch):
+    """Base64 офисный файл блокирован всегда, даже на адрес из списка."""
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "partner@example.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    monkeypatch.setenv("MAIL_USERNAME", "stavgeo26@mail.ru")
+    
+    docx = [{
+        "filename": "Тариф.docx",
+        "mime": "application/msword",
+        "size_bytes": 100,
+        "is_from_email_attachments": False  # Или отсутствует этот флаг
+    }]
+    # Блокировка, несмотря на адрес в allowlist
+    with pytest.raises(AttachmentError, match="офисные файлы"):
+        mail_attachments.check_office(docx, ["partner@example.ru"],
+                                     from_email_attachments=False)
+
+
+def test_office_to_internal_address_always_allowed(monkeypatch):
+    """Офисный файл на внутренний адрес разрешён всегда, независимо от FORWARD_ALLOWLIST."""
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "partner@example.ru")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    monkeypatch.setenv("MAIL_USERNAME", "stavgeo26@mail.ru")
+    
+    docx = [{
+        "filename": "Квартальный отчет.pptx",
+        "mime": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "size_bytes": 100
+    }]
+    # Внутренний адрес — проходит
+    mail_attachments.check_office(docx, ["stavgeo26@mail.ru"])
+
+
+def test_forward_clean_not_accessible_without_office_files(monkeypatch):
+    """forward_clean отправляет даже без офисных файлов — разрешение не требуется."""
+    monkeypatch.setenv("FORWARD_ALLOWLIST", "")
+    monkeypatch.delenv("INTERNAL_EMAILS", raising=False)
+    monkeypatch.setenv("MAIL_USERNAME", "stavgeo26@mail.ru")
+    
+    pdf = [{
+        "filename": "Отчет.pdf",
+        "mime": "application/pdf",
+        "size_bytes": 100,
+        "is_from_email_attachments": True
+    }]
+    # PDF не требует разрешения
+    mail_attachments.check_office(pdf, ["external@example.ru"],
+                                 from_email_attachments=True, source_uid="789")
+
+
+def test_parse_forward_allowlist():
+    """parse_forward_allowlist корректно разбирает переменную окружения."""
+    import os
+    
+    # Пустая переменная
+    os.environ["FORWARD_ALLOWLIST"] = ""
+    assert mail_attachments.parse_forward_allowlist() == set()
+    
+    # Один адрес
+    os.environ["FORWARD_ALLOWLIST"] = "partner@example.ru"
+    assert mail_attachments.parse_forward_allowlist() == {"partner@example.ru"}
+    
+    # Несколько адресов с пробелами
+    os.environ["FORWARD_ALLOWLIST"] = "  partner@example.ru  ,  trusted@corp.ru , "
+    assert mail_attachments.parse_forward_allowlist() == {
+        "partner@example.ru", "trusted@corp.ru"
+    }
+    
+    # Нормализация регистра
+    os.environ["FORWARD_ALLOWLIST"] = "Partner@Example.RU"
+    assert mail_attachments.parse_forward_allowlist() == {"partner@example.ru"}
+    
+    os.environ.pop("FORWARD_ALLOWLIST", None)
